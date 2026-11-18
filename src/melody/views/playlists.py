@@ -1,0 +1,565 @@
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Adw, GLib, Gtk, Pango
+
+from melody.services.collection_actions import (
+    SORT_OPTIONS,
+    attach_track_context_menu,
+    sort_tracks,
+)
+from melody.widgets.collection_grid import CollectionGrid
+from melody.widgets.editable_value import EditableValue
+
+
+class PlaylistsView(Gtk.Box):
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        self.database = None
+        self.tracks = []
+        self.playlists = []
+        self.current_playlist = None
+        self.current_tracks = []
+        self.playback_manager = None
+        self._playlist_paths = {}
+        self._playlist_covers = {}
+
+        self.on_create_playlist = None
+        self.on_rename_playlist = None
+        self.on_add_to_playlist = None
+
+        self._build_header()
+        self._build_grid()
+        self._build_details()
+
+        self.stack = Gtk.Stack()
+        self.stack.set_vexpand(True)
+        self.stack.add_named(self.grid_page, "grid")
+        self.stack.add_named(self.details_page, "details")
+        self.stack.add_named(self.empty_page, "empty")
+
+        self.append(self.stack)
+        self.stack.set_visible_child_name("empty")
+
+    # ------------------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------------------
+
+    def set_data(self, database, tracks, playback_manager):
+        self.database = database
+        self.tracks = list(tracks)
+        self.playback_manager = playback_manager
+
+        if self.playback_manager is not None:
+            GLib.timeout_add(250, self._update_play_buttons)
+
+        self.refresh()
+
+    def set_callbacks(self, create_playlist, rename_playlist, add_to_playlist):
+        self.on_create_playlist = create_playlist
+        self.on_rename_playlist = rename_playlist
+        self.on_add_to_playlist = add_to_playlist
+
+    # ------------------------------------------------------------------
+    # Header and grid
+    # ------------------------------------------------------------------
+
+    def _build_header(self):
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        header.set_margin_start(24)
+        header.set_margin_end(24)
+        header.set_margin_top(16)
+
+        title = Gtk.Label(label="Playlists", xalign=0)
+        title.add_css_class("title-2")
+        title.set_hexpand(True)
+
+        self.count_label = Gtk.Label(label="0 playlists")
+        self.count_label.add_css_class("dim-label")
+
+        create_button = Gtk.Button.new_from_icon_name("list-add-symbolic")
+        create_button.set_tooltip_text("Create playlist")
+        create_button.connect("clicked", self._on_create_clicked)
+
+        header.append(title)
+        header.append(self.count_label)
+        header.append(create_button)
+
+        # Same 12px as the spacing between the header's own controls, so the
+        # grid never starts flush against the bottom of the search bar.
+        header.set_margin_bottom(12)
+        self.grid_header = header
+
+    def _build_grid(self):
+        self.grid = CollectionGrid(
+            on_open=self._show_playlist,
+            placeholder_icon="view-list-symbolic",
+        )
+
+        self.empty_page = Adw.StatusPage(
+            title="No playlists yet",
+            description="Create playlists to organize your music.",
+            icon_name="view-list-symbolic",
+        )
+
+        self.grid_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.grid_page.append(self.grid_header)
+        self.grid_page.append(self.grid)
+
+    def refresh(self):
+        if self.database is None:
+            return
+
+        self.playlists = self.database.get_playlists()
+        self._refresh_grid()
+
+        if not self.playlists:
+            self.current_playlist = None
+            self.current_tracks = []
+            self.stack.set_visible_child_name("empty")
+
+        elif self.current_playlist is not None:
+            refreshed = self.database.get_playlist(self.current_playlist["id"])
+
+            if refreshed:
+                self._show_playlist(refreshed)
+            else:
+                self.current_playlist = None
+                self.current_tracks = []
+                self.stack.set_visible_child_name("grid")
+
+        else:
+            self.stack.set_visible_child_name("grid")
+
+        self._update_play_buttons()
+
+    def _refresh_grid(self):
+        visible_playlists = sorted(
+            self.playlists,
+            key=lambda playlist: str(playlist.get("name") or "").casefold(),
+        )
+
+        track_by_path = {track.get("path"): track for track in self.tracks}
+
+        # Resolve every playlist's tracks once per refresh; the cover and the
+        # "is this playlist playing" check both reuse it.
+        self._playlist_paths = {}
+        self._playlist_covers = {}
+        for playlist in visible_playlists:
+            playlist_tracks = self.database.get_playlist_tracks(playlist["id"])
+            self._playlist_paths[playlist["id"]] = {
+                track.get("path") for track in playlist_tracks
+            }
+
+            first = (
+                        track_by_path.get(playlist_tracks[0].get("path"))
+                        if playlist_tracks
+                        else None
+                    ) or {}
+            self._playlist_covers[playlist["id"]] = (
+                    first.get("album_artwork_path") or first.get("artwork_path")
+            )
+
+        self.grid.populate(
+            visible_playlists,
+            describe=self._describe_playlist,
+            on_play=self._toggle_playlist,
+            play_tooltip="Play playlist",
+        )
+
+        self.count_label.set_text(
+            f"{len(self.playlists)} "
+            f"playlist{'s' if len(self.playlists) != 1 else ''}"
+        )
+
+        self._update_play_buttons()
+
+    def _describe_playlist(self, playlist):
+        count = playlist.get("track_count", 0)
+        return (
+            playlist["name"],
+            f"{count} track{'s' if count != 1 else ''}",
+            self._playlist_covers.get(playlist["id"]),
+        )
+
+    # ------------------------------------------------------------------
+    # Playlist details
+    # ------------------------------------------------------------------
+
+    def _build_details(self):
+        self.details_page = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=16,
+        )
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        header.set_margin_start(24)
+        header.set_margin_end(24)
+        header.set_margin_top(16)
+
+        back_button = Gtk.Button.new_from_icon_name("go-previous-symbolic")
+        back_button.set_tooltip_text("Back to playlists")
+        back_button.connect("clicked", self._on_back_clicked)
+
+        self.details_heading = Gtk.Label(xalign=0)
+        self.details_heading.add_css_class("title-2")
+        self.details_heading.set_hexpand(True)
+
+        self.sort_dropdown = Gtk.DropDown.new_from_strings(SORT_OPTIONS)
+        self.sort_dropdown.set_selected(0)
+        self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
+
+        header.append(back_button)
+        header.append(self.details_heading)
+        self.details_page.append(header)
+
+        info = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=24,
+        )
+        info.set_margin_start(24)
+        info.set_margin_end(24)
+
+        self.cover = Gtk.Picture()
+        self.cover.set_size_request(200, 200)
+        self.cover.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.cover.set_can_shrink(True)
+
+        placeholder = Gtk.Image.new_from_icon_name("view-list-symbolic")
+        placeholder.set_pixel_size(96)
+
+        self.cover_stack = Gtk.Stack()
+        self.cover_stack.set_size_request(200, 200)
+        self.cover_stack.set_valign(Gtk.Align.START)
+        self.cover_stack.add_named(self.cover, "cover")
+        self.cover_stack.add_named(placeholder, "placeholder")
+
+        labels = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=8,
+        )
+        labels.set_valign(Gtk.Align.START)
+        labels.set_hexpand(True)
+
+        self.name_label = EditableValue(
+            self._on_rename_clicked,
+            "Rename playlist",
+            css_classes=("title-1",),
+        )
+
+        self.track_count_label = Gtk.Label(xalign=0)
+        self.track_count_label.add_css_class("dim-label")
+
+        self.details_play_button = Gtk.Button(label="Play")
+        self.details_play_button.set_halign(Gtk.Align.START)
+        self.details_play_button.connect("clicked", self._on_play_clicked)
+
+        delete_button = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+        delete_button.set_tooltip_text("Delete playlist")
+        delete_button.add_css_class("destructive-action")
+        delete_button.connect("clicked", self._on_delete_clicked)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        actions.set_halign(Gtk.Align.START)
+        actions.append(self.details_play_button)
+        actions.append(delete_button)
+
+        labels.append(self.name_label)
+        labels.append(self.track_count_label)
+        labels.append(actions)
+
+        # Sort selector: bottom-right of the header, right above the list.
+        self.sort_dropdown.set_valign(Gtk.Align.END)
+        self.sort_dropdown.set_halign(Gtk.Align.END)
+
+        info.append(self.cover_stack)
+        info.append(labels)
+        info.append(self.sort_dropdown)
+        self.details_page.append(info)
+
+        self.details_page.append(
+            Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        )
+
+        self.track_list = Gtk.ListBox()
+        self.track_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.track_list.set_activate_on_single_click(False)
+        self.track_list.add_css_class("boxed-list")
+        self.track_list.connect("row-activated", self._on_track_activated)
+
+        track_scroll = Gtk.ScrolledWindow()
+        track_scroll.set_policy(
+            Gtk.PolicyType.NEVER,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+        track_scroll.set_vexpand(True)
+        track_scroll.set_margin_start(24)
+        track_scroll.set_margin_end(24)
+        track_scroll.set_margin_bottom(16)
+        track_scroll.set_child(self.track_list)
+
+        self.details_page.append(track_scroll)
+
+    def _show_playlist(self, playlist):
+        self.current_playlist = playlist
+
+        tracks = self.database.get_playlist_tracks(playlist["id"])
+
+        by_path = {
+            track.get("path"): track
+            for track in self.tracks
+        }
+
+        for track in tracks:
+            cached = by_path.get(track.get("path"), {})
+            track["artwork_path"] = cached.get("artwork_path")
+            track["album_artwork_path"] = cached.get("album_artwork_path")
+
+        self.current_tracks = tracks
+
+        self.details_heading.set_text("Playlist")
+        self.name_label.set_text(playlist["name"])
+        self.track_count_label.set_text(
+            f"{len(tracks)} track{'s' if len(tracks) != 1 else ''}"
+        )
+
+        first = tracks[0] if tracks else None
+        artwork_path = (
+                (first or {}).get("album_artwork_path")
+                or (first or {}).get("artwork_path")
+        )
+
+        if artwork_path:
+            self.cover.set_filename(artwork_path)
+            self.cover_stack.set_visible_child_name("cover")
+        else:
+            self.cover.set_filename(None)
+            self.cover_stack.set_visible_child_name("placeholder")
+
+        self._refresh_detail_tracks()
+        self.stack.set_visible_child_name("details")
+        self._update_play_buttons()
+
+    def _create_track_row(self, track):
+        row = Gtk.ListBoxRow()
+        row.track = track
+
+        content = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=12,
+        )
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+
+        title = Gtk.Label(
+            label=str(track.get("title") or "Unknown Title"),
+            xalign=0,
+        )
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title.set_hexpand(True)
+
+        duration = Gtk.Label(
+            label=self._format_duration(track.get("duration")),
+            xalign=1,
+        )
+        duration.add_css_class("dim-label")
+
+        content.append(title)
+        content.append(duration)
+        row.set_child(content)
+
+        if self.on_add_to_playlist is not None:
+            attach_track_context_menu(
+                row,
+                track,
+                lambda: [
+                    playlist
+                    for playlist in self.database.get_playlists()
+                    if playlist["id"] != self.current_playlist["id"]
+                ],
+                self.on_add_to_playlist,
+                create_playlist=None,
+                remove_from_playlist=(
+                    lambda selected_track,
+                           playlist_id=self.current_playlist["id"]:
+                    self._remove_track(playlist_id, selected_track)
+                ),
+            )
+
+        return row
+
+    def _refresh_detail_tracks(self):
+        child = self.track_list.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self.track_list.remove(child)
+            child = next_child
+
+        if self.current_playlist is None:
+            return
+
+        tracks = sort_tracks(
+            self.current_tracks,
+            self.sort_dropdown.get_selected(),
+        )
+
+        for track in tracks:
+            self.track_list.append(self._create_track_row(track))
+
+    # ------------------------------------------------------------------
+    # Playback
+    # ------------------------------------------------------------------
+
+    def _is_playlist_playing(self, playlist):
+        if (
+                self.playback_manager is None
+                or self.playback_manager.current_track is None
+        ):
+            return False
+
+        current_path = self.playback_manager.current_track.get("path")
+
+        return any(
+            track.get("path") == current_path
+            for track in self.database.get_playlist_tracks(playlist["id"])
+        )
+
+    def _update_play_buttons(self):
+        if self.playback_manager is None or self.database is None:
+            return GLib.SOURCE_CONTINUE
+
+        current_track = self.playback_manager.current_track
+        current_path = current_track.get("path") if current_track else None
+        is_playing_state = self.playback_manager.state == "playing"
+        self.grid.update_playing(
+            lambda playlist: (
+                    is_playing_state
+                    and current_path in self._playlist_paths.get(playlist["id"], ())
+            )
+        )
+
+        if self.current_playlist is not None:
+            playing = (
+                    self._is_playlist_playing(self.current_playlist)
+                    and self.playback_manager.state == "playing"
+            )
+            self.details_play_button.set_label("Pause" if playing else "Play")
+
+        return GLib.SOURCE_CONTINUE
+
+    def _toggle_playlist(self, playlist):
+        if self.playback_manager is None:
+            return
+
+        if self._is_playlist_playing(playlist):
+            if self.playback_manager.state == "playing":
+                self.playback_manager.pause()
+            else:
+                self.playback_manager.play()
+        else:
+            self._play_playlist(playlist)
+
+        self._update_play_buttons()
+
+    def _play_playlist(self, playlist):
+        if self.playback_manager is None:
+            return
+
+        tracks = self.database.get_playlist_tracks(playlist["id"])
+        if tracks:
+            self.playback_manager.play_queue(sort_tracks(tracks, 0))
+
+        self._update_play_buttons()
+
+    def _on_play_clicked(self, button):
+        if self.current_playlist is not None:
+            self._toggle_playlist(self.current_playlist)
+
+    def _on_track_activated(self, list_box, row):
+        if self.playback_manager is None:
+            return
+
+        tracks = sort_tracks(
+            self.current_tracks,
+            self.sort_dropdown.get_selected(),
+        )
+
+        for index, track in enumerate(tracks):
+            if track.get("id") == row.track.get("id"):
+                self.playback_manager.play_queue(tracks, index)
+                break
+
+    def _on_delete_clicked(self, button):
+        if self.current_playlist is None:
+            return
+
+        dialog = Adw.MessageDialog.new(
+            self.get_root(),
+            "Delete playlist?",
+            f'Are you sure you want to delete "{self.current_playlist["name"]}"?',
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance(
+            "delete",
+            Adw.ResponseAppearance.DESTRUCTIVE,
+        )
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_delete_response)
+        dialog.present()
+
+    def _on_delete_response(self, dialog, response):
+        if response != "delete" or self.current_playlist is None:
+            return
+
+        self.database.delete_playlist(self.current_playlist["id"])
+        self.current_playlist = None
+        self.current_tracks = []
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # Playlist actions
+    # ------------------------------------------------------------------
+
+    def _add_track_to_another_playlist(self, track, playlist_id):
+        if self.database is not None:
+            self.database.add_track_to_playlist(playlist_id, track["id"])
+            self.refresh()
+
+    def _remove_track(self, playlist_id, track):
+        self.database.remove_track_from_playlist(playlist_id, track["id"])
+        self.refresh()
+
+    def _on_create_clicked(self, button):
+        if self.on_create_playlist is not None:
+            self.on_create_playlist()
+
+    def _on_rename_clicked(self):
+        if (
+                self.current_playlist is not None
+                and self.on_rename_playlist is not None
+        ):
+            self.on_rename_playlist(self.current_playlist)
+
+    # ------------------------------------------------------------------
+    # Navigation and sorting
+    # ------------------------------------------------------------------
+
+    def _on_sort_changed(self, dropdown, pspec):
+        self._refresh_detail_tracks()
+
+    def _on_back_clicked(self, button):
+        self.stack.set_visible_child_name("grid")
+
+    @staticmethod
+    def _format_duration(duration):
+        duration = max(0, int(duration or 0))
+        minutes, seconds = divmod(duration, 60)
+        return f"{minutes}:{seconds:02}"
