@@ -9,6 +9,8 @@ from melody.services.collection_actions import (
     SORT_OPTIONS,
     attach_track_context_menu,
     sort_tracks,
+    toggle_track_playback,
+    track_is_playing,
 )
 from melody.layout import style_header_controls
 from melody.widgets.collection_grid import CollectionGrid
@@ -25,9 +27,8 @@ class AlbumsView(Gtk.Box):
         self.albums = []
         self.current_album = None
         self.playback_manager = None
-        self._get_playlists = None
-        self._add_to_playlist = None
-        self._create_playlist = None
+        self._edit_track = None
+        self._choose_playlist = None
         self.on_rename_album = None
         self.on_rename_album_artist = None
 
@@ -48,10 +49,9 @@ class AlbumsView(Gtk.Box):
         self.playback_manager = playback_manager
         GLib.timeout_add(250, self._update_play_buttons)
 
-    def set_context_actions(self, get_playlists, add_to_playlist, create_playlist):
-        self._get_playlists = get_playlists
-        self._add_to_playlist = add_to_playlist
-        self._create_playlist = create_playlist
+    def set_context_actions(self, edit_track, choose_playlist):
+        self._edit_track = edit_track
+        self._choose_playlist = choose_playlist
 
     def set_rename_callbacks(self, title_callback, artist_callback):
         self.on_rename_album = title_callback
@@ -387,16 +387,22 @@ class AlbumsView(Gtk.Box):
         content.append(duration)
         row.set_child(content)
 
-        if self._add_to_playlist is not None:
+        if self._edit_track is not None:
             attach_track_context_menu(
                 row,
                 track,
-                self._get_playlists,
-                self._add_to_playlist,
-                self._create_playlist,
+                on_play_pause=self._toggle_track,
+                is_playing=lambda t: track_is_playing(self.playback_manager, t),
+                on_edit=self._edit_track,
+                on_add_to_playlist=self._choose_playlist,
             )
 
         return row
+
+    def _toggle_track(self, track):
+        queue = self.current_album["tracks"] if self.current_album else [track]
+        toggle_track_playback(self.playback_manager, track, queue)
+        self._update_play_buttons()
 
     def _refresh_detail_tracks(self):
         child = self.track_list.get_first_child()

@@ -296,3 +296,53 @@ class LibraryEditor:
             make_metadata,
             allow_merge,
         )
+    def edit_track(
+            self,
+            track_id: str,
+            title: str,
+            artist: str,
+            album: str,
+    ) -> dict:
+        """Edit one track's title (and file name), artist and album.
+
+        The tags are rewritten and the file is moved to
+        ``<album artist>/<album>/<title>.<ext>``. The track's album artist is
+        left untouched.
+        """
+        title = title.strip()
+        artist = artist.strip()
+        album = album.strip()
+
+        if not title:
+            raise ValueError("A track title cannot be empty")
+        if not artist:
+            raise ValueError("An artist name cannot be empty")
+        if not album:
+            raise ValueError("An album name cannot be empty")
+
+        track = self.database.get_track(track_id)
+
+        if track is None:
+            raise LibraryEditError("The selected track no longer exists")
+
+        def make_metadata(current):
+            return TrackMetadata(
+                title=title,
+                artist=artist,
+                album=album,
+                album_artist=current["album_artist"],
+                duration=current["duration"],
+                year=current["year"],
+                genre=current["genre"],
+            )
+
+        try:
+            return self._move_collection_tracks(
+                [track],
+                make_metadata,
+                allow_merge=False,
+            )
+        except CollectionMergeRequired:
+            raise LibraryEditError(
+                f'A file named "{title}" already exists in that album.'
+            ) from None

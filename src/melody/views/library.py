@@ -11,7 +11,11 @@ from gi.repository import Adw, GLib, Gtk, Pango
 
 from melody.services.artwork import get_cached_full_artwork
 from melody.layout import PAGE_MARGIN, SEARCH_WIDTH, style_header_controls
-from melody.services.collection_actions import attach_track_context_menu
+from melody.services.collection_actions import (
+    attach_track_context_menu,
+    toggle_track_playback,
+    track_is_playing,
+)
 
 
 class LibraryView(Gtk.Box):
@@ -28,9 +32,8 @@ class LibraryView(Gtk.Box):
         self.tracks = []
         self.playback_manager = None
         self._artwork_request_id = 0
-        self._get_playlists = None
-        self._add_to_playlist = None
-        self._create_playlist = None
+        self._edit_track = None
+        self._choose_playlist = None
 
         self._build_header()
         self._build_list()
@@ -64,10 +67,9 @@ class LibraryView(Gtk.Box):
     def set_playback_manager(self, playback_manager):
         self.playback_manager = playback_manager
 
-    def set_context_actions(self, get_playlists, add_to_playlist, create_playlist):
-        self._get_playlists = get_playlists
-        self._add_to_playlist = add_to_playlist
-        self._create_playlist = create_playlist
+    def set_context_actions(self, edit_track, choose_playlist):
+        self._edit_track = edit_track
+        self._choose_playlist = choose_playlist
         self._refresh_list()
 
     def _build_header(self):
@@ -293,12 +295,23 @@ class LibraryView(Gtk.Box):
         content.append(duration)
 
         row.set_child(content)
-        if self._add_to_playlist is not None:
+        if self._edit_track is not None:
             attach_track_context_menu(
-                row, track, self._get_playlists, self._add_to_playlist,
-                self._create_playlist,
+                row,
+                track,
+                on_play_pause=self._toggle_track,
+                is_playing=lambda t: track_is_playing(self.playback_manager, t),
+                on_edit=self._edit_track,
+                on_add_to_playlist=self._choose_playlist,
             )
         return row
+
+    def _toggle_track(self, track):
+        toggle_track_playback(
+            self.playback_manager,
+            track,
+            self._get_sorted_tracks(self.tracks),
+        )
 
     def _on_track_activated(self, list_box, row):
         if self.playback_manager is None or not self.tracks:

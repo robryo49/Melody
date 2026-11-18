@@ -9,7 +9,13 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib
 
 from melody.services import LibraryManager, LibraryEditor, CollectionMergeRequired
-from melody.services.collection_actions import show_text_dialog, show_merge_confirmation, show_error_dialog
+from melody.services.collection_actions import (
+    show_edit_track_dialog,
+    show_error_dialog,
+    show_merge_confirmation,
+    show_playlist_picker_dialog,
+    show_text_dialog,
+)
 from melody.services.artwork import (
     get_cached_artwork,
     get_cached_full_artwork,
@@ -52,21 +58,11 @@ class MelodyWindow(Adw.ApplicationWindow):
         for name in ("Library", "Albums", "Artists"):
             self.views[name].set_playback_manager(self.playback_manager)
 
-        self.views["Library"].set_context_actions(
-            self.database.get_playlists,
-            self._add_track_to_playlist,
-            self._create_playlist_for_track,
-        )
-        self.views["Albums"].set_context_actions(
-            self.database.get_playlists,
-            self._add_track_to_playlist,
-            self._create_playlist_for_track,
-        )
-        self.views["Artists"].set_context_actions(
-            self.database.get_playlists,
-            self._add_track_to_playlist,
-            self._create_playlist_for_track,
-        )
+        for name in ("Library", "Albums", "Artists"):
+            self.views[name].set_context_actions(
+                self._edit_track,
+                self._choose_playlist_for_track,
+            )
         self.views["Albums"].set_rename_callbacks(
             self._rename_album,
             self._rename_album_artist,
@@ -79,7 +75,8 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Playlists"].set_callbacks(
             self._create_playlist,
             self._rename_playlist,
-            self._add_track_to_playlist,
+            self._choose_playlist_for_track,
+            self._edit_track,
         )
 
         self.navigation_rows = {}
@@ -352,6 +349,35 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.views["Playlists"].refresh()
         except Exception as error:
             show_error_dialog(self, "Could not add track", error)
+
+    def _choose_playlist_for_track(self, track, exclude_playlist_id=None):
+        playlists = [
+            playlist for playlist in self.database.get_playlists()
+            if playlist["id"] != exclude_playlist_id
+        ]
+        show_playlist_picker_dialog(
+            self,
+            track,
+            playlists,
+            lambda playlist_id: self._add_track_to_playlist(track, playlist_id),
+            lambda: self._create_playlist_for_track(track),
+        )
+
+    def _edit_track(self, track):
+        def save(values):
+            try:
+                result = self.library_editor.edit_track(
+                    track["id"],
+                    values["title"],
+                    values["artist"],
+                    values["album"],
+                )
+            except Exception as error:
+                show_error_dialog(self, "Could not edit track", error)
+                return
+            self._finish_collection_rename(result, "track")
+
+        show_edit_track_dialog(self, track, save)
 
     def _create_playlist_for_track(self, track):
         def create(name):

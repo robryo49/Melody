@@ -9,6 +9,8 @@ from melody.services.collection_actions import (
     SORT_OPTIONS,
     attach_track_context_menu,
     sort_tracks,
+    toggle_track_playback,
+    track_is_playing,
 )
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.editable_value import EditableValue
@@ -31,6 +33,7 @@ class PlaylistsView(Gtk.Box):
         self.on_create_playlist = None
         self.on_rename_playlist = None
         self.on_add_to_playlist = None
+        self.on_edit_track = None
 
         self._build_header()
         self._build_grid()
@@ -59,10 +62,17 @@ class PlaylistsView(Gtk.Box):
 
         self.refresh()
 
-    def set_callbacks(self, create_playlist, rename_playlist, add_to_playlist):
+    def set_callbacks(
+            self,
+            create_playlist,
+            rename_playlist,
+            add_to_playlist,
+            edit_track,
+    ):
         self.on_create_playlist = create_playlist
         self.on_rename_playlist = rename_playlist
         self.on_add_to_playlist = add_to_playlist
+        self.on_edit_track = edit_track
 
     # ------------------------------------------------------------------
     # Header and grid
@@ -374,25 +384,31 @@ class PlaylistsView(Gtk.Box):
         content.append(duration)
         row.set_child(content)
 
-        if self.on_add_to_playlist is not None:
+        if self.on_edit_track is not None:
+            playlist_id = self.current_playlist["id"]
             attach_track_context_menu(
                 row,
                 track,
-                lambda: [
-                    playlist
-                    for playlist in self.database.get_playlists()
-                    if playlist["id"] != self.current_playlist["id"]
-                ],
-                self.on_add_to_playlist,
-                create_playlist=None,
-                remove_from_playlist=(
-                    lambda selected_track,
-                           playlist_id=self.current_playlist["id"]:
-                    self._remove_track(playlist_id, selected_track)
+                on_play_pause=self._toggle_track,
+                is_playing=lambda t: track_is_playing(self.playback_manager, t),
+                on_edit=self.on_edit_track,
+                on_add_to_playlist=lambda t: self.on_add_to_playlist(
+                    t, exclude_playlist_id=playlist_id
+                ),
+                on_remove_from_playlist=lambda t: self._remove_track(
+                    playlist_id, t
                 ),
             )
 
         return row
+
+    def _toggle_track(self, track):
+        queue = sort_tracks(
+            self.current_tracks,
+            self.sort_dropdown.get_selected(),
+        )
+        toggle_track_playback(self.playback_manager, track, queue)
+        self._update_play_buttons()
 
     def _refresh_detail_tracks(self):
         child = self.track_list.get_first_child()
