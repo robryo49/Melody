@@ -13,7 +13,7 @@ from melody.services.collection_actions import (
     track_is_playing,
 )
 from melody.widgets.collection_grid import CollectionGrid
-from melody.widgets.editable_value import EditableValue
+from melody.widgets.value_label import value_label
 
 
 class PlaylistsView(Gtk.Box):
@@ -179,6 +179,7 @@ class PlaylistsView(Gtk.Box):
             describe=self._describe_playlist,
             on_play=self._toggle_playlist,
             play_tooltip="Play playlist",
+            on_edit=self._on_edit_playlist_from_grid,
         )
 
         self.count_label.set_text(
@@ -187,6 +188,14 @@ class PlaylistsView(Gtk.Box):
         )
 
         self._update_play_buttons()
+
+    def _on_edit_playlist_from_grid(self, playlist):
+        if self.on_rename_playlist is not None:
+            self.on_rename_playlist(playlist)
+
+    def cover_for(self, playlist):
+        """The cover shown for ``playlist`` in the grid (or None)."""
+        return self._playlist_covers.get(playlist["id"])
 
     def _describe_playlist(self, playlist):
         count = playlist.get("track_count", 0)
@@ -255,11 +264,7 @@ class PlaylistsView(Gtk.Box):
         labels.set_valign(Gtk.Align.START)
         labels.set_hexpand(True)
 
-        self.name_label = EditableValue(
-            self._on_rename_clicked,
-            "Rename playlist",
-            css_classes=("title-1",),
-        )
+        self.name_label = value_label(css_classes=("title-1",))
 
         self.track_count_label = Gtk.Label(xalign=0)
         self.track_count_label.add_css_class("dim-label")
@@ -267,6 +272,12 @@ class PlaylistsView(Gtk.Box):
         self.details_play_button = Gtk.Button(label="Play")
         self.details_play_button.set_halign(Gtk.Align.START)
         self.details_play_button.connect("clicked", self._on_play_clicked)
+
+        edit_button = Gtk.Button(label="Edit")
+        edit_button.connect(
+            "clicked",
+            lambda _button: self._on_rename_clicked(),
+        )
 
         delete_button = Gtk.Button.new_from_icon_name("user-trash-symbolic")
         delete_button.set_tooltip_text("Delete playlist")
@@ -276,6 +287,7 @@ class PlaylistsView(Gtk.Box):
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         actions.set_halign(Gtk.Align.START)
         actions.append(self.details_play_button)
+        actions.append(edit_button)
         actions.append(delete_button)
 
         labels.append(self.name_label)

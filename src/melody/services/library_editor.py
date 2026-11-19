@@ -4,8 +4,21 @@ import shutil
 from pathlib import Path
 
 from melody.database import Database
-from melody.services.library_scanner import _sanitize_name
+from melody.services.artwork import _find_local_artist_image
+from melody.services.artwork_editor import (
+    ArtworkError,
+    embed_artwork,
+    prepare_image,
+    write_artist_image,
+    write_cover_image,
+)
+from melody.services.library_scanner import SUPPORTED_EXTENSIONS, _sanitize_name
 from melody.services.metadata import MetadataError, TrackMetadata, write_metadata
+
+
+# Images Melody reads from an album's folder (see services/artwork.py).
+FOLDER_IMAGE_STEMS = {"cover", "folder", "front", "album"}
+FOLDER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 class LibraryEditError(Exception):
@@ -163,6 +176,7 @@ class LibraryEditor:
             )
 
         result = {"moved": 0, "errors": [], "merged": False}
+        moves = []
 
         for track, source, destination, metadata in operations:
             try:
@@ -181,6 +195,7 @@ class LibraryEditor:
                     metadata,
                 )
                 result["moved"] += 1
+                moves.append((source.parent, destination.parent))
 
                 # Remove empty folders left behind by the move, but never
                 # remove the music root itself.
@@ -194,6 +209,8 @@ class LibraryEditor:
 
             except Exception as error:
                 result["errors"].append(f"{source}: {error}")
+
+        self._carry_folder_images(moves, result)
 
         result["merged"] = bool(allow_merge)
         return result
@@ -291,11 +308,19 @@ class LibraryEditor:
                 genre=track["genre"],
             )
 
-        return self._move_collection_tracks(
+        result = self._move_collection_tracks(
             tracks,
             make_metadata,
             allow_merge,
         )
+
+        # An artist's own picture (artist.jpg...) sits in their folder, which
+        # the move has just left behind: bring it along.
+        if not result["errors"]:
+            self._carry_artist_image(old_artist, new_artist, result)
+
+        return result
+
     def edit_track(
             self,
             track_id: str,
@@ -346,3 +371,201 @@ class LibraryEditor:
             raise LibraryEditError(
                 f'A file named "{title}" already exists in that album.'
             ) from None
+
+    # ------------------------------------------------------------------
+    # Images
+    # ------------------------------------------------------------------
+
+    def _carry_folder_images(self, moves, result: dict):
+        """Move cover images along with the last file leaving a folder.
+
+        ``moves`` is a list of ``(old folder, new folder)``. A folder's
+        ``cover.jpg`` & co. follow only once no audio file is left in it, so
+        moving one track out of an album never takes the album's cover away.
+        """
+        for old, new in set(moves):
+            if old == new or not old.is_dir():
+                continue
+
+            try:
+                entries = list(old.iterdir())
+            except OSError:
+                continue
+
+            if any(
+                    entry.is_file()
+                    and entry.suffix.casefold() in SUPPORTED_EXTENSIONS
+                    for entry in entries
+            ):
+                continue
+
+            for entry in entries:
+                if (
+                        entry.is_file()
+                        and entry.stem.casefold() in FOLDER_IMAGE_STEMS
+                        and entry.suffix.casefold() in FOLDER_IMAGE_EXTENSIONS
+                        and not (new / entry.name).exists()
+                ):
+                    try:
+                        shutil.move(str(entry), str(new / entry.name))
+                    except OSError as error:
+                        result["errors"].append(f"{entry}: {error}")
+
+            # Remove what the move left empty, never the music root itself.
+            parent = old
+            while parent != self.music_folder:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+
+    def _carry_artist_image(self, old_artist: str, new_artist: str, result: dict):
+        old_folder = self.music_folder / _sanitize_name(old_artist)
+        new_folder = self.music_folder / _sanitize_name(new_artist)
+
+        if old_folder == new_folder or not old_folder.is_dir():
+            return
+
+        image = _find_local_artist_image(old_folder)
+
+        # Never replace a picture the destination artist already has.
+        if image is None or _find_local_artist_image(new_folder) is not None:
+            return
+
+        try:
+            new_folder.mkdir(parents=True, exist_ok=True)
+            shutil.move(
+                str(image),
+                str(new_folder / f"artist{image.suffix.lower()}"),
+            )
+
+            try:
+                old_folder.rmdir()
+            except OSError:
+                pass
+
+        except OSError as error:
+            result["errors"].append(f"{image}: {error}")
+
+    def _embed_cover(self, tracks: list[dict], data: bytes) -> dict:
+        """Embed ``data`` as the cover of every track in ``tracks``."""
+        try:
+            image, mime = prepare_image(data)
+        except ArtworkError as error:
+            raise LibraryEditError(str(error)) from None
+
+        result = {"updated": 0, "errors": []}
+
+        for track in tracks:
+            try:
+                source = self._inside_library(Path(track["path"]))
+
+                embed_artwork(source, image, mime)
+
+                # The file changed on disk: record its new size and date so
+                # the next library scan doesn't see it as modified.
+                self.database.update_track(
+                    track["id"],
+                    source,
+                    TrackMetadata(
+                        title=track["title"],
+                        artist=track["artist"],
+                        album=track["album"],
+                        album_artist=track["album_artist"],
+                        duration=track["duration"],
+                        year=track["year"],
+                        genre=track["genre"],
+                    ),
+                )
+                result["updated"] += 1
+
+            except Exception as error:
+                result["errors"].append(f"{track['path']}: {error}")
+
+        return result
+
+    def set_track_image(self, track_id: str, data: bytes) -> dict:
+        """Embed ``data`` as the cover of one track's file."""
+        track = self.database.get_track(track_id)
+
+        if track is None:
+            raise LibraryEditError("The selected track no longer exists")
+
+        return self._embed_cover([track], data)
+
+    def set_album_image(
+            self,
+            album_artist: str,
+            album: str,
+            data: bytes,
+            *,
+            apply_to_tracks: bool = True,
+            write_folder: bool = True,
+    ) -> dict:
+        """Set an album's artwork.
+
+        ``write_folder`` saves it as ``cover.jpg`` in the album's folder,
+        which is the album's own cover. ``apply_to_tracks`` also embeds it in
+        every track's file.
+        """
+        tracks = [
+            track for track in self._tracks()
+            if self._key(track["album_artist"] or track["artist"])
+               == self._key(album_artist)
+               and self._key(track["album"]) == self._key(album)
+        ]
+
+        if not tracks:
+            raise LibraryEditError("The selected album no longer exists")
+
+        result = {"updated": 0, "errors": []}
+
+        if apply_to_tracks:
+            result = self._embed_cover(tracks, data)
+
+        if not write_folder:
+            return result
+
+        # The album's own cover: a cover.jpg in its folder, where Melody (and
+        # other players) look for it.
+        try:
+            image, _mime = prepare_image(data, jpeg_only=True)
+        except ArtworkError as error:
+            raise LibraryEditError(str(error)) from None
+
+        for folder in sorted({Path(track["path"]).parent for track in tracks}):
+            try:
+                write_cover_image(self._inside_library(folder), image)
+            except Exception as error:
+                result["errors"].append(f"{folder}: {error}")
+
+        return result
+
+    def set_artist_image(self, artist: str, data: bytes) -> dict:
+        """Save ``data`` as ``artist.jpg`` in the artist's folder."""
+        artist = artist.strip()
+
+        if not any(
+                self._key(track["album_artist"] or track["artist"])
+                == self._key(artist)
+                for track in self._tracks()
+        ):
+            raise LibraryEditError("The selected artist no longer exists")
+
+        try:
+            image, _mime = prepare_image(data, jpeg_only=True)
+        except ArtworkError as error:
+            raise LibraryEditError(str(error)) from None
+
+        folder = self._inside_library(self.music_folder / _sanitize_name(artist))
+
+        if not folder.is_dir():
+            raise LibraryEditError(f"The artist's folder does not exist: {folder}")
+
+        try:
+            write_artist_image(folder, image)
+        except ArtworkError as error:
+            raise LibraryEditError(str(error)) from None
+
+        return {"updated": 1, "errors": []}

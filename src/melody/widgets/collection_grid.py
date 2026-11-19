@@ -18,6 +18,8 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Gdk, GdkPixbuf, Gtk, Pango
 
+from melody.services.collection_actions import attach_context_menu
+
 COVER_SIZE = 160
 COVER_RADIUS = 12
 GRID_SPACING = 24
@@ -94,6 +96,8 @@ class CollectionCard(Gtk.Box):
             placeholder_icon,
             play_tooltip,
             on_play,
+            on_edit=None,
+            on_open=None,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -166,6 +170,24 @@ class CollectionCard(Gtk.Box):
         motion.connect("leave", self._on_leave)
         self.add_controller(motion)
 
+        # --- right-click menu -------------------------------------------
+        if on_edit is not None:
+            def menu_entries():
+                entries = [
+                    (
+                        "Pause" if self._playing else "Play",
+                        lambda: on_play(self.item),
+                    ),
+                ]
+
+                if on_open is not None:
+                    entries.append(("Open", lambda: on_open(self.item)))
+
+                entries.append(("Edit…", lambda: on_edit(self.item)))
+                return entries
+
+            attach_context_menu(self, menu_entries)
+
     def _on_enter(self, _controller, _x, _y):
         self._hovered = True
         self._sync_play_button()
@@ -222,11 +244,23 @@ class CollectionGrid(Gtk.ScrolledWindow):
 
         self.set_child(self.flow_box)
 
-    def populate(self, items, describe, on_play, play_tooltip):
+    def populate(
+            self,
+            items,
+            describe,
+            on_play,
+            play_tooltip,
+            on_edit=None,
+            open_in_menu=False,
+    ):
         """Rebuild the grid.
 
         ``describe(item)`` must return ``(title, subtitle, artwork_path)``.
         ``on_play(item)`` is called when a card's play/pause button is hit.
+        ``on_edit(item)``, if given, adds an "Edit…" entry to the cards'
+        right-click menu (which also has Play/Pause). With ``open_in_menu``
+        the menu also gets an "Open" entry, which does what clicking the
+        card does.
         """
         self.flow_box.remove_all()
         self.cards = []
@@ -241,6 +275,8 @@ class CollectionGrid(Gtk.ScrolledWindow):
                 self._placeholder_icon,
                 play_tooltip,
                 on_play,
+                on_edit,
+                self._on_open if open_in_menu else None,
             )
             self.flow_box.append(card)
             self.cards.append(card)

@@ -10,16 +10,24 @@ from gi.repository import Adw, Gtk, GLib
 
 from melody.services import LibraryManager, LibraryEditor, CollectionMergeRequired
 from melody.services.collection_actions import (
+    show_edit_album_dialog,
+    show_edit_artist_dialog,
+    show_edit_playlist_dialog,
     show_edit_track_dialog,
     show_error_dialog,
     show_merge_confirmation,
     show_playlist_picker_dialog,
     show_text_dialog,
+    set_track_navigation,
 )
 from melody.services.artwork import (
+    get_album_artwork_bytes,
+    get_cached_album_artwork,
     get_cached_artwork,
-    get_cached_full_artwork,
+    get_local_artist_artwork,
 )
+from melody.services.library_scanner import _sanitize_name
+from melody.services.image_sources import album_sources, artist_sources
 from melody.services.playback_manager import PlaybackManager
 from melody.views import (
     LibraryView,
@@ -28,6 +36,7 @@ from melody.views import (
     PlaylistsView,
     PreferencesView,
 )
+from melody.widgets.image_picker import show_image_picker
 from melody.widgets.player_bar import PlayerBar
 
 
@@ -64,17 +73,28 @@ class MelodyWindow(Adw.ApplicationWindow):
                 self._choose_playlist_for_track,
             )
         self.views["Albums"].set_rename_callbacks(
-            self._rename_album,
-            self._rename_album_artist,
+            self._edit_album,
+            self._edit_album,
         )
         self.views["Artists"].set_rename_callbacks(
-            self._rename_artist,
-            self._rename_album,
-            self._rename_album_artist,
+            self._edit_artist,
+            self._edit_album,
+            self._edit_album,
+        )
+        self.views["Albums"].set_image_callbacks(self._change_album_image)
+        self.views["Artists"].set_image_callbacks(
+            self._change_artist_image,
+            self._change_album_image,
+        )
+        set_track_navigation(
+            self._open_album_of_track,
+            self._open_artist_of_track,
+            self._is_album_of_track_open,
+            self._is_artist_of_track_open,
         )
         self.views["Playlists"].set_callbacks(
             self._create_playlist,
-            self._rename_playlist,
+            self._edit_playlist,
             self._choose_playlist_for_track,
             self._edit_track,
         )
@@ -285,13 +305,15 @@ class MelodyWindow(Adw.ApplicationWindow):
                 album_key = self._album_key(track)
 
                 if album_key not in album_artwork:
-                    album_artwork[album_key] = get_cached_full_artwork(
+                    album_artwork[album_key] = get_cached_album_artwork(
                         track_path,
                         artist,
                         album,
                     )
 
                 track["album_artwork_path"] = album_artwork[album_key]
+
+            self._attach_artist_artwork(tracks)
 
         except Exception as error:
             GLib.idle_add(
@@ -363,21 +385,75 @@ class MelodyWindow(Adw.ApplicationWindow):
             lambda: self._create_playlist_for_track(track),
         )
 
+    # ------------------------------------------------------------------
+    # "Open album" / "Open artist" in a track's right-click menu
+    # ------------------------------------------------------------------
+
+    def _open_album_of_track(self, track):
+        if self.views["Albums"].open_album_of_track(track):
+            self._select_page("Albums")
+
+    def _open_artist_of_track(self, track):
+        if self.views["Artists"].open_artist_of_track(track):
+            self._select_page("Artists")
+
+    def _is_album_of_track_open(self, track):
+        page = self.content_stack.get_visible_child_name()
+
+        if page == "albums":
+            return self.views["Albums"].is_album_open(track)
+
+        if page == "artists":
+            return self.views["Artists"].is_album_open(track)
+
+        return False
+
+    def _is_artist_of_track_open(self, track):
+        return (
+            self.content_stack.get_visible_child_name() == "artists"
+            and self.views["Artists"].is_artist_open(track)
+        )
+
     def _edit_track(self, track):
         def save(values):
-            try:
-                result = self.library_editor.edit_track(
-                    track["id"],
-                    values["title"],
-                    values["artist"],
-                    values["album"],
-                )
-            except Exception as error:
-                show_error_dialog(self, "Could not edit track", error)
-                return
-            self._finish_collection_rename(result, "track")
+            image = values.get("image")
+            changed = any(
+                values[key].strip() != str(track.get(key) or "").strip()
+                for key in ("title", "artist", "album")
+            )
+            result = {"moved": 0, "errors": [], "merged": False}
 
-        show_edit_track_dialog(self, track, save)
+            if changed:
+                try:
+                    result = self.library_editor.edit_track(
+                        track["id"],
+                        values["title"],
+                        values["artist"],
+                        values["album"],
+                    )
+                except Exception as error:
+                    show_error_dialog(self, "Could not edit track", error)
+                    return
+
+            # The image is written after the rest, so it lands in the file
+            # as it is once renamed and moved.
+            if image:
+                self._apply_image(
+                    result,
+                    lambda: self.library_editor.set_track_image(
+                        track["id"], image,
+                    ),
+                )
+
+            self._finish_collection_rename(
+                result,
+                "track",
+                refresh_artwork_ids=[track["id"]] if image else (),
+            )
+
+        show_edit_track_dialog(
+            self, track, save, library_tracks=self.tracks,
+        )
 
     def _create_playlist_for_track(self, track):
         def create(name):
@@ -403,67 +479,201 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         show_text_dialog(self, "Create playlist", "Choose a name for the new playlist.", "", create)
 
-    def _rename_playlist(self, playlist):
-        def rename(name):
+    def _edit_playlist(self, playlist):
+        def save(values):
             try:
-                self.database.rename_playlist(playlist["id"], name)
+                self.database.rename_playlist(playlist["id"], values["name"])
                 self.views["Playlists"].refresh()
             except Exception as error:
-                show_error_dialog(self, "Could not rename playlist", error)
+                show_error_dialog(self, "Could not edit playlist", error)
 
-        show_text_dialog(self, "Rename playlist", "Enter the new playlist name.", playlist["name"], rename)
+        show_edit_playlist_dialog(
+            self,
+            playlist,
+            self.views["Playlists"].cover_for(playlist),
+            save,
+        )
 
-    def _rename_album(self, album):
-        def prompt():
-            def rename(new_name):
-                self._perform_collection_rename(
-                    lambda allow: self.library_editor.rename_album(
-                        album["artist"], album["title"], new_name,
+    def _edit_album(self, album):
+        def save(values):
+            image = values.get("image")
+            apply_to_tracks = bool(values.get("apply_to_tracks"))
+            renamed = (
+                values["title"] != album["title"]
+                or values["artist"] != album["artist"]
+            )
+            track_ids = [track["id"] for track in album["tracks"]]
+
+            # What "Apply artwork" writes into the tracks: the newly picked
+            # image, or else the album's current artwork. Read now, before a
+            # rename moves the files.
+            artwork_data = image
+            if apply_to_tracks and artwork_data is None:
+                artwork_data = self._album_artwork_bytes(album)
+
+                if artwork_data is None:
+                    show_error_dialog(
+                        self,
+                        "Could not apply artwork",
+                        "This album has no artwork to apply to its tracks.",
+                    )
+                    return
+
+            def operation(allow):
+                result = {"moved": 0, "errors": [], "merged": False}
+
+                # One call handles a new title, a new album artist or both:
+                # the editor rewrites the tags, moves the files, and asks
+                # before merging into an existing album.
+                if renamed:
+                    result = self.library_editor.rename_album(
+                        album["artist"], album["title"], values["title"],
+                        new_artist=values["artist"],
                         allow_merge=allow,
-                    ),
-                    "album",
-                )
-            show_text_dialog(
-                self, "Rename album", "Enter the new album title.",
-                album["title"], rename,
-            )
-        prompt()
+                    )
 
-    def _rename_album_artist(self, album):
-        def rename(new_artist):
-            # Same title, new artist: the editor rewrites the tags and moves
-            # the files into the new artist's folder (asking before merging
-            # into an existing album).
+                # Then the artwork goes to the album under its new name: a
+                # newly picked image becomes its cover.jpg, and "Apply
+                # artwork" also writes the artwork into every track.
+                if artwork_data is not None:
+                    self._apply_image(
+                        result,
+                        lambda: self.library_editor.set_album_image(
+                            values["artist"],
+                            values["title"],
+                            artwork_data,
+                            apply_to_tracks=apply_to_tracks,
+                            write_folder=image is not None,
+                        ),
+                    )
+
+                return result
+
             self._perform_collection_rename(
-                lambda allow: self.library_editor.rename_album(
-                    album["artist"], album["title"], album["title"],
-                    new_artist=new_artist,
-                    allow_merge=allow,
-                ),
+                operation,
                 "album",
-            )
-
-        show_text_dialog(
-            self, "Change album artist",
-            "Enter the new artist for this album. Its files will be moved "
-            "to that artist's folder.",
-            album["artist"], rename,
-        )
-
-    def _rename_artist(self, artist):
-        def rename(new_name):
-            self._perform_collection_rename(
-                lambda allow: self.library_editor.rename_artist(
-                    artist["name"], new_name, allow_merge=allow,
+                refresh_artwork_ids=(
+                    track_ids if artwork_data is not None else ()
                 ),
-                "artist",
             )
-        show_text_dialog(
-            self, "Rename artist", "Enter the new artist name.",
-            artist["name"], rename,
+
+        show_edit_album_dialog(self, album, self.tracks, save)
+
+    def _edit_artist(self, artist):
+        def save(values):
+            image = values.get("image")
+            renamed = values["name"] != artist["name"]
+
+            def operation(allow):
+                result = {"moved": 0, "errors": [], "merged": False}
+
+                if renamed:
+                    result = self.library_editor.rename_artist(
+                        artist["name"], values["name"], allow_merge=allow,
+                    )
+
+                if image:
+                    self._apply_image(
+                        result,
+                        lambda: self.library_editor.set_artist_image(
+                            values["name"], image,
+                        ),
+                    )
+
+                return result
+
+            self._perform_collection_rename(operation, "artist")
+
+        show_edit_artist_dialog(self, artist, self.tracks, save)
+
+    @staticmethod
+    def _album_artwork_bytes(album):
+        """The album's current artwork at full size (None if it has none)."""
+        for track in album["tracks"]:
+            try:
+                data = get_album_artwork_bytes(Path(track["path"]))
+            except Exception:
+                data = None
+
+            if data:
+                return data
+
+        # Fall back on the 256px copy generated for the grid.
+        for track in album["tracks"]:
+            cached = track.get("album_artwork_path")
+
+            if cached:
+                try:
+                    return Path(cached).read_bytes()
+                except OSError:
+                    continue
+
+        return None
+
+    def _change_album_image(self, album):
+        """The edit button over an album's cover: pick, then apply right away
+        (there is no Save step outside the edit window). The image becomes the
+        album's cover; the tracks keep their own images (the edit window's
+        "Apply artwork" button writes it into them)."""
+        track_ids = [track["id"] for track in album["tracks"]]
+
+        def apply(data):
+            result = {"errors": []}
+            self._apply_image(
+                result,
+                lambda: self.library_editor.set_album_image(
+                    album["artist"],
+                    album["title"],
+                    data,
+                    apply_to_tracks=False,
+                ),
+            )
+            self._finish_collection_rename(
+                result, "album", refresh_artwork_ids=track_ids,
+            )
+
+        show_image_picker(
+            self,
+            album_sources(album["artist"], album["title"]),
+            apply,
         )
 
-    def _perform_collection_rename(self, operation, collection_type):
+    def _change_artist_image(self, artist):
+        """The edit button over an artist's picture (see above)."""
+        def apply(data):
+            result = {"errors": []}
+            self._apply_image(
+                result,
+                lambda: self.library_editor.set_artist_image(
+                    artist["name"], data,
+                ),
+            )
+            self._finish_collection_rename(result, "artist")
+
+        show_image_picker(self, artist_sources(artist["name"]), apply)
+
+    @staticmethod
+    def _apply_image(result, apply):
+        """Run ``apply()`` (which writes the chosen image) and fold what went
+        wrong into ``result``.
+
+        By then the names have already been changed, so a failure here is
+        reported along with the other errors rather than raised, which would
+        hide the part that worked.
+        """
+        try:
+            outcome = apply()
+        except Exception as error:
+            result["errors"].append(f"Image: {error}")
+        else:
+            result["errors"].extend(outcome.get("errors", []))
+
+    def _perform_collection_rename(
+            self,
+            operation,
+            collection_type,
+            refresh_artwork_ids=(),
+    ):
         try:
             result = operation(False)
         except CollectionMergeRequired as merge:
@@ -471,38 +681,122 @@ class MelodyWindow(Adw.ApplicationWindow):
                 self,
                 collection_type,
                 merge.name,
-                lambda: self._confirm_collection_rename(operation, collection_type),
+                lambda: self._confirm_collection_rename(
+                    operation, collection_type, refresh_artwork_ids,
+                ),
             )
             return
         except Exception as error:
             show_error_dialog(self, f"Could not rename {collection_type}", error)
             return
-        self._finish_collection_rename(result, collection_type)
+        self._finish_collection_rename(
+            result, collection_type, refresh_artwork_ids,
+        )
 
-    def _confirm_collection_rename(self, operation, collection_type):
+    def _confirm_collection_rename(
+            self,
+            operation,
+            collection_type,
+            refresh_artwork_ids=(),
+    ):
         try:
             result = operation(True)
         except Exception as error:
             show_error_dialog(self, f"Could not rename {collection_type}", error)
             return
-        self._finish_collection_rename(result, collection_type)
+        self._finish_collection_rename(
+            result, collection_type, refresh_artwork_ids,
+        )
 
-    def _finish_collection_rename(self, result, collection_type):
+    def _finish_collection_rename(
+            self,
+            result,
+            collection_type,
+            refresh_artwork_ids=(),
+    ):
         if result.get("errors"):
             show_error_dialog(
                 self,
                 f"Some {collection_type} files could not be updated",
                 "\n".join(result["errors"]),
             )
-        self._reload_library_from_database()
+        self._reload_library_from_database(refresh_artwork_ids)
 
-    def _reload_library_from_database(self):
+    def _attach_artist_artwork(self, tracks):
+        """Give every track the path of its artist's own picture, if any.
+
+        That is an image in the artist's folder (``artist.jpg``...), found
+        without touching the network.
+        """
+        pictures = {}
+
+        for track in tracks:
+            name = str(
+                track.get("album_artist")
+                or track.get("artist")
+                or "Unknown Artist"
+            )
+            key = name.casefold()
+
+            if key not in pictures:
+                pictures[key] = get_local_artist_artwork(
+                    self.library_manager.music_folder / _sanitize_name(name)
+                )
+
+            track["artist_artwork_path"] = pictures[key]
+
+    def _refresh_artwork(self, tracks, track_ids):
+        """Regenerate the artwork of ``track_ids`` after their image changed.
+
+        Only those tracks' thumbnails are redone. The cover of each album they
+        belong to is redone the way the library scan does it (from the album's
+        first track), so editing one track never makes the album show a
+        different cover unless that track is the one the album takes it from.
+        """
+        first_track = {}
+        for track in tracks:
+            first_track.setdefault(self._album_key(track), track)
+
+        album_covers = {}
+
+        for track in tracks:
+            if track["id"] not in track_ids:
+                continue
+
+            artist = (
+                track.get("album_artist")
+                or track.get("artist")
+                or "Unknown Artist"
+            )
+            album = track.get("album") or "Unknown Album"
+
+            track["artwork_path"] = get_cached_artwork(
+                Path(track["path"]), artist, album,
+            )
+
+            key = self._album_key(track)
+            if key not in album_covers:
+                album_covers[key] = get_cached_album_artwork(
+                    Path(first_track[key]["path"]), artist, album,
+                )
+
+        for track in tracks:
+            key = self._album_key(track)
+            if key in album_covers:
+                track["album_artwork_path"] = album_covers[key]
+
+    def _reload_library_from_database(self, refresh_artwork_ids=()):
         previous = {track["id"]: track for track in self.tracks}
         tracks = self.database.get_tracks()
         for track in tracks:
             old = previous.get(track["id"], {})
             track["artwork_path"] = old.get("artwork_path")
             track["album_artwork_path"] = old.get("album_artwork_path")
+
+        if refresh_artwork_ids:
+            self._refresh_artwork(tracks, set(refresh_artwork_ids))
+
+        self._attach_artist_artwork(tracks)
         self.tracks = tracks
         self.playback_manager.set_queue(tracks)
         self.views["Library"].set_tracks(tracks)

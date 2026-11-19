@@ -66,6 +66,7 @@ class LibraryView(Gtk.Box):
 
     def set_playback_manager(self, playback_manager):
         self.playback_manager = playback_manager
+        GLib.timeout_add(250, self._update_action_buttons)
 
     def set_context_actions(self, edit_track, choose_playlist):
         self._edit_track = edit_track
@@ -142,11 +143,19 @@ class LibraryView(Gtk.Box):
         self.scrolled_window.set_child(self.track_list)
 
     def _build_details_panel(self):
-        self.details_container = Gtk.Fixed()
+        # The container stacks the track info (top) and the action buttons
+        # (pinned to the bottom of the panel).
+        self.details_container = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=0,
+        )
         self.details_container.set_size_request(self.PANEL_WIDTH, -1)
         self.details_container.set_hexpand(False)
         self.details_container.set_vexpand(True)
         self.details_container.set_halign(Gtk.Align.START)
+
+        details_fixed = Gtk.Fixed()
+        details_fixed.set_vexpand(True)
 
         self.details_panel = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -210,11 +219,86 @@ class LibraryView(Gtk.Box):
         self.details_path.add_css_class("caption")
         self.details_panel.append(self.details_path)
 
-        self.details_container.put(
+        details_fixed.put(
             self.details_panel,
             self.PANEL_PADDING,
             18,
         )
+
+        self.details_container.append(details_fixed)
+        self.details_container.append(self._build_action_buttons())
+
+    def _build_action_buttons(self):
+        box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=8,
+        )
+        box.set_margin_start(self.PANEL_PADDING)
+        box.set_margin_end(self.PANEL_PADDING)
+        box.set_margin_top(12)
+        box.set_margin_bottom(16)
+
+        self.play_button = Gtk.Button(label="Play")
+        self.play_button.add_css_class("suggested-action")
+        self.play_button.connect("clicked", self._on_play_button_clicked)
+
+        self.edit_button = Gtk.Button(label="Edit…")
+        self.edit_button.connect("clicked", self._on_edit_button_clicked)
+
+        self.playlist_button = Gtk.Button(label="Add to playlist…")
+        self.playlist_button.connect(
+            "clicked",
+            self._on_playlist_button_clicked,
+        )
+
+        for button in (
+            self.play_button,
+            self.edit_button,
+            self.playlist_button,
+        ):
+            button.set_sensitive(False)
+            box.append(button)
+
+        return box
+
+    def _selected_track(self):
+        row = self.track_list.get_selected_row()
+        return row.track if row is not None else None
+
+    def _update_action_buttons(self):
+        track = self._selected_track()
+        has_track = track is not None
+
+        for button in (
+            self.play_button,
+            self.edit_button,
+            self.playlist_button,
+        ):
+            button.set_sensitive(has_track)
+
+        playing = has_track and track_is_playing(self.playback_manager, track)
+        self.play_button.set_label("Pause" if playing else "Play")
+
+        return GLib.SOURCE_CONTINUE
+
+    def _on_play_button_clicked(self, button):
+        track = self._selected_track()
+
+        if track is not None:
+            self._toggle_track(track)
+            self._update_action_buttons()
+
+    def _on_edit_button_clicked(self, button):
+        track = self._selected_track()
+
+        if track is not None and self._edit_track is not None:
+            self._edit_track(track)
+
+    def _on_playlist_button_clicked(self, button):
+        track = self._selected_track()
+
+        if track is not None and self._choose_playlist is not None:
+            self._choose_playlist(track)
 
     @staticmethod
     def _create_detail_label():
@@ -349,6 +433,7 @@ class LibraryView(Gtk.Box):
             self._format_duration(track.get("duration"))
         )
         self.details_path.set_text(track_path)
+        self._update_action_buttons()
 
         self.artwork_stack.set_visible_child_name("placeholder")
         self.details_artwork.set_filename(None)
@@ -401,6 +486,7 @@ class LibraryView(Gtk.Box):
         self.details_album.set_text("")
         self.details_duration.set_text("")
         self.details_path.set_text("")
+        self._update_action_buttons()
 
     @staticmethod
     def _format_duration(duration):

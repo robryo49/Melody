@@ -14,7 +14,8 @@ from melody.services.collection_actions import (
 )
 from melody.layout import style_header_controls
 from melody.widgets.collection_grid import CollectionGrid
-from melody.widgets.editable_value import EditableValue
+from melody.widgets.cover_edit_button import with_edit_button
+from melody.widgets.value_label import value_label
 
 
 class AlbumsView(Gtk.Box):
@@ -31,6 +32,7 @@ class AlbumsView(Gtk.Box):
         self._choose_playlist = None
         self.on_rename_album = None
         self.on_rename_album_artist = None
+        self.on_change_album_image = None
 
         self._build_header()
         self._build_grid()
@@ -56,6 +58,45 @@ class AlbumsView(Gtk.Box):
     def set_rename_callbacks(self, title_callback, artist_callback):
         self.on_rename_album = title_callback
         self.on_rename_album_artist = artist_callback
+
+    def set_image_callbacks(self, album_callback):
+        self.on_change_album_image = album_callback
+
+    # ------------------------------------------------------------------
+    # Navigation from a track's menu
+    # ------------------------------------------------------------------
+
+    def _album_of_track(self, track):
+        track_id = track.get("id")
+
+        for album in self.albums:
+            if any(candidate.get("id") == track_id for candidate in album["tracks"]):
+                return album
+
+        return None
+
+    def open_album_of_track(self, track):
+        """Show the details of the album ``track`` is in. False if unknown."""
+        album = self._album_of_track(track)
+
+        if album is None:
+            return False
+
+        self._show_album(album)
+        return True
+
+    def is_album_open(self, track):
+        """True when the details page of ``track``'s album is showing."""
+        album = self._album_of_track(track)
+        current = self.current_album
+
+        return (
+            album is not None
+            and current is not None
+            and self.stack.get_visible_child_name() == "details"
+            and (current["artist"].casefold(), current["title"].casefold())
+            == (album["artist"].casefold(), album["title"].casefold())
+        )
 
     # ------------------------------------------------------------------
     # Header and grid
@@ -191,6 +232,8 @@ class AlbumsView(Gtk.Box):
             describe=self._describe_album,
             on_play=self._toggle_album,
             play_tooltip="Play album",
+            on_edit=self._on_edit_album_from_grid,
+            open_in_menu=True,
         )
 
         total = len(self.albums)
@@ -214,6 +257,10 @@ class AlbumsView(Gtk.Box):
         )
 
         self._update_play_buttons()
+
+    def _on_edit_album_from_grid(self, album):
+        if self.on_rename_album is not None:
+            self.on_rename_album(album)
 
     @staticmethod
     def _describe_album(album):
@@ -283,15 +330,9 @@ class AlbumsView(Gtk.Box):
         info_labels.set_valign(Gtk.Align.START)
         info_labels.set_hexpand(True)
 
-        self.details_album_title = EditableValue(
-            self._on_edit_album_clicked,
-            "Rename album",
-            css_classes=("title-1",),
-        )
+        self.details_album_title = value_label(css_classes=("title-1",))
 
-        self.details_artist = EditableValue(
-            self._on_edit_album_artist_clicked,
-            "Change album artist",
+        self.details_artist = value_label(
             css_classes=("title-3", "dim-label"),
         )
 
@@ -302,16 +343,32 @@ class AlbumsView(Gtk.Box):
         self.details_play_button.set_halign(Gtk.Align.START)
         self.details_play_button.connect("clicked", self._on_details_play_clicked)
 
+        edit_button = Gtk.Button(label="Edit")
+        edit_button.connect(
+            "clicked",
+            lambda _button: self._on_edit_album_clicked(),
+        )
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        actions.set_halign(Gtk.Align.START)
+        actions.append(self.details_play_button)
+        actions.append(edit_button)
+
         info_labels.append(self.details_album_title)
         info_labels.append(self.details_artist)
         info_labels.append(self.details_track_count)
-        info_labels.append(self.details_play_button)
+        info_labels.append(actions)
 
         # Sort selector: bottom-right of the header, right above the list.
         self.details_sort_dropdown.set_valign(Gtk.Align.END)
         self.details_sort_dropdown.set_halign(Gtk.Align.END)
 
-        info.append(self.details_artwork_stack)
+        info.append(
+            with_edit_button(
+                self.details_artwork_stack,
+                self._on_change_album_image_clicked,
+            )
+        )
         info.append(info_labels)
         info.append(self.details_sort_dropdown)
         self.details_page.append(info)
@@ -426,6 +483,13 @@ class AlbumsView(Gtk.Box):
     def _on_edit_album_clicked(self):
         if self.current_album is not None and self.on_rename_album is not None:
             self.on_rename_album(self.current_album)
+
+    def _on_change_album_image_clicked(self):
+        if (
+                self.current_album is not None
+                and self.on_change_album_image is not None
+        ):
+            self.on_change_album_image(self.current_album)
 
     def _on_edit_album_artist_clicked(self):
         if (

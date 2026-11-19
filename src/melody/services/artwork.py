@@ -34,6 +34,7 @@ MUSICBRAINZ_URL = "https://musicbrainz.org/ws/2/release/"
 MUSICBRAINZ_ARTIST_URL = "https://musicbrainz.org/ws/2/artist/"
 COVER_ART_URL = "https://coverartarchive.org/release/"
 DEEZER_URL = "https://api.deezer.com"
+ITUNES_URL = "https://itunes.apple.com/search"
 FANART_URL = "https://webservice.fanart.tv/v3.2/music/"
 WIKIDATA_URL = "https://www.wikidata.org/w/api.php"
 
@@ -89,52 +90,77 @@ def _get_artwork_data(path: Path) -> bytes | None:
     return None
 
 
-def _get_local_artwork(path: Path) -> bytes | None:
-    directory = path.parent
+_FOLDER_ARTWORK_NAMES = [
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "folder.jpg",
+    "folder.jpeg",
+    "folder.png",
+    "front.jpg",
+    "front.jpeg",
+    "front.png",
+    "album.jpg",
+    "album.jpeg",
+    "album.png",
+]
 
-    preferred_names = [
-        "cover.jpg",
-        "cover.jpeg",
-        "cover.png",
-        "folder.jpg",
-        "folder.jpeg",
-        "folder.png",
-        "front.jpg",
-        "front.jpeg",
-        "front.png",
-        "album.jpg",
-        "album.jpeg",
-        "album.png",
+
+def _local_artwork_candidates(
+        directory: Path,
+        named_only: bool = False,
+) -> list[Path]:
+    """Images in ``directory``, best first.
+
+    The usual cover names come first; unless ``named_only`` is set, any
+    other image in the folder follows.
+    """
+    named = [
+        directory / name
+        for name in _FOLDER_ARTWORK_NAMES
+        if (directory / name).is_file()
     ]
 
-    for name in preferred_names:
-        candidate = directory / name
-
-        if candidate.is_file():
-            try:
-                return candidate.read_bytes()
-            except OSError:
-                pass
+    if named_only:
+        return named
 
     image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
 
     try:
-        candidates = sorted(
+        others = sorted(
             candidate
             for candidate in directory.iterdir()
             if candidate.is_file()
             and candidate.suffix.casefold() in image_extensions
         )
     except OSError:
-        return None
+        return named
 
-    for candidate in candidates:
+    return named + [candidate for candidate in others if candidate not in named]
+
+
+def _get_local_artwork(path: Path, named_only: bool = False) -> bytes | None:
+    for candidate in _local_artwork_candidates(path.parent, named_only):
         try:
             return candidate.read_bytes()
         except OSError:
             pass
 
     return None
+
+
+def _local_artwork_stamp(path: Path) -> str:
+    """Identifies the cover image sitting next to ``path`` (name, date, size),
+    so a cache entry made from it goes stale when that image changes."""
+    for candidate in _local_artwork_candidates(path.parent, named_only=True):
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+
+        return f"{candidate.name}:{stat.st_mtime_ns}:{stat.st_size}"
+
+    return "none"
 
 
 def _normalize_text(value: str) -> str:
@@ -459,6 +485,8 @@ def _get_cached_artwork(
         size: int,
         artist: str | None = None,
         album: str | None = None,
+        prefer_folder: bool = False,
+        embedded_only: bool = False,
 ) -> str | None:
     path = Path(path)
 
@@ -467,10 +495,15 @@ def _get_cached_artwork(
 
         ARTWORK_CACHE.mkdir(parents=True, exist_ok=True)
 
+        folder_part = (
+            f":folder:{_local_artwork_stamp(path)}" if prefer_folder else ""
+        )
+        own_part = ":own" if embedded_only else ""
+
         cache_key = hashlib.sha256(
             (
                 f"{path.resolve()}:{stat.st_mtime_ns}:"
-                f"{stat.st_size}:{size}"
+                f"{stat.st_size}:{size}{folder_part}{own_part}"
             ).encode()
         ).hexdigest()
 
@@ -479,18 +512,26 @@ def _get_cached_artwork(
         if cached_path.is_file():
             return str(cached_path)
 
-        # 1. Embedded artwork.
-        try:
-            artwork_data = _get_artwork_data(path)
-        except Exception:
-            artwork_data = None
+        artwork_data = None
 
-        # 2. Local album artwork.
+        # An album's cover is the image in its folder (cover.jpg...) when it
+        # has one, ahead of whatever its first track happens to embed.
+        if prefer_folder and not embedded_only:
+            artwork_data = _get_local_artwork(path, named_only=True)
+
+        # 1. Embedded artwork.
         if not artwork_data:
+            try:
+                artwork_data = _get_artwork_data(path)
+            except Exception:
+                artwork_data = None
+
+        # 2. Local album artwork (never for a track's own image).
+        if not artwork_data and not embedded_only:
             artwork_data = _get_local_artwork(path)
 
         # 3. MusicBrainz + Cover Art Archive.
-        if not artwork_data and artist and album:
+        if not artwork_data and artist and album and not embedded_only:
             try:
                 release_id = _get_musicbrainz_release_id(path)
             except Exception:
@@ -934,3 +975,181 @@ def get_cached_full_artwork(
 ) -> str | None:
     """Return artwork standardized to exactly 256x256 pixels."""
     return _get_cached_artwork(path, 256, artist, album)
+
+
+# ----------------------------------------------------------------------
+# Public helpers for the image picker (full-size images, not cached tiles)
+# ----------------------------------------------------------------------
+
+def get_cached_album_artwork(
+        path: Path,
+        artist: str | None = None,
+        album: str | None = None,
+) -> str | None:
+    """256x256 cover of the album ``path`` belongs to.
+
+    Unlike ``get_cached_full_artwork`` (a track's image, embedded first),
+    the album's image in its folder (cover.jpg...) comes first here.
+    """
+    return _get_cached_artwork(path, 256, artist, album, prefer_folder=True)
+
+
+def get_cached_own_artwork(path: Path) -> str | None:
+    """256x256 image embedded in the track's own file, and nothing else: no
+    folder image, no online lookup. None when the track has none."""
+    return _get_cached_artwork(path, 256, embedded_only=True)
+
+
+def get_album_artwork_bytes(path: Path) -> bytes | None:
+    """Full-size cover of the album ``path`` belongs to: the image in its
+    folder if there is one, otherwise what the track embeds."""
+    path = Path(path)
+    return _get_local_artwork(path, named_only=True) or get_track_artwork_bytes(path)
+
+
+def get_track_artwork_bytes(path: Path) -> bytes | None:
+    """Full-size artwork of an audio file: embedded, else a folder image."""
+    path = Path(path)
+
+    try:
+        data = _get_artwork_data(path)
+    except Exception:
+        data = None
+
+    return data or _get_local_artwork(path)
+
+
+def get_local_artist_artwork(artist_folder: Path, size: int = 256) -> str | None:
+    """Square artist portrait from an image in the artist's own folder.
+
+    Unlike ``get_cached_artist_artwork`` this never touches the network, so
+    it is cheap enough to call for every artist when the library loads.
+    """
+    try:
+        local_image = _find_local_artist_image(Path(artist_folder))
+
+        if local_image is None:
+            return None
+
+        stat = local_image.stat()
+        source_key = (
+            f"local:{local_image.resolve()}:"
+            f"{stat.st_mtime_ns}:{stat.st_size}"
+        )
+        cache_key = hashlib.sha256(
+            f"{source_key}:{size}".encode()
+        ).hexdigest()
+
+        ARTIST_IMAGE_CACHE.mkdir(parents=True, exist_ok=True)
+        cached_path = ARTIST_IMAGE_CACHE / f"{cache_key}.png"
+
+        if not cached_path.is_file():
+            _create_cached_image(local_image.read_bytes(), cached_path, size)
+
+        return str(cached_path)
+
+    except Exception:
+        return None
+
+
+def get_online_album_artwork(artist: str, album: str) -> bytes | None:
+    """Cover from MusicBrainz / the Cover Art Archive."""
+    return _get_online_artwork(artist, album)
+
+
+def get_deezer_artist_image(artist: str) -> bytes | None:
+    return _search_deezer_artist(artist)
+
+
+def get_fanart_artist_image(artist: str) -> bytes | None:
+    return _get_fanart_artist_artwork(artist)
+
+
+def get_wikimedia_artist_image(artist: str) -> bytes | None:
+    return _get_wikidata_artist_artwork(artist)
+
+
+def _album_result_matches(
+        result_artist: str,
+        result_album: str,
+        artist: str,
+        album: str,
+) -> bool:
+    if _normalize_text(result_artist) != _normalize_text(artist):
+        return False
+
+    found = _normalize_text(result_album)
+    wanted = _normalize_text(album)
+
+    if not found or not wanted:
+        return False
+
+    return found == wanted or wanted in found or found in wanted
+
+
+def get_deezer_album_image(artist: str, album: str) -> bytes | None:
+    url = DEEZER_URL + "/search/album?" + urlencode({
+        "q": f'artist:"{artist}" album:"{album}"',
+        "limit": 10,
+    })
+
+    response = json.loads(_http_get(url))
+
+    for result in response.get("data", []):
+        if not _album_result_matches(
+                (result.get("artist") or {}).get("name", ""),
+                result.get("title", ""),
+                artist,
+                album,
+        ):
+            continue
+
+        image_url = (
+                result.get("cover_xl")
+                or result.get("cover_big")
+                or result.get("cover_medium")
+        )
+
+        if not image_url:
+            continue
+
+        try:
+            return _download_image(image_url)
+        except (OSError, ValueError, URLError, HTTPError):
+            continue
+
+    return None
+
+
+def get_itunes_album_image(artist: str, album: str) -> bytes | None:
+    url = ITUNES_URL + "?" + urlencode({
+        "term": f"{artist} {album}",
+        "entity": "album",
+        "limit": 10,
+    })
+
+    response = json.loads(_http_get(url))
+
+    for result in response.get("results", []):
+        if not _album_result_matches(
+                result.get("artistName", ""),
+                result.get("collectionName", ""),
+                artist,
+                album,
+        ):
+            continue
+
+        image_url = result.get("artworkUrl100")
+
+        if not image_url:
+            continue
+
+        # The API hands out a 100px thumbnail; the same URL works at 1000px.
+        image_url = image_url.replace("100x100bb", "1000x1000bb")
+
+        try:
+            return _download_image(image_url)
+        except (OSError, ValueError, URLError, HTTPError):
+            continue
+
+    return None

@@ -14,7 +14,8 @@ from melody.services.collection_actions import (
 )
 from melody.layout import style_header_controls
 from melody.widgets.collection_grid import CollectionGrid
-from melody.widgets.editable_value import EditableValue
+from melody.widgets.cover_edit_button import with_edit_button
+from melody.widgets.value_label import value_label
 
 
 class ArtistsView(Gtk.Box):
@@ -33,6 +34,8 @@ class ArtistsView(Gtk.Box):
         self.on_rename_artist = None
         self.on_rename_album = None
         self.on_rename_album_artist = None
+        self.on_change_artist_image = None
+        self.on_change_album_image = None
 
         self._build_header()
         self._build_grid()
@@ -66,6 +69,81 @@ class ArtistsView(Gtk.Box):
         self.on_rename_artist = artist_callback
         self.on_rename_album = album_title_callback
         self.on_rename_album_artist = album_artist_callback
+
+    def set_image_callbacks(self, artist_callback, album_callback):
+        self.on_change_artist_image = artist_callback
+        self.on_change_album_image = album_callback
+
+    # ------------------------------------------------------------------
+    # Navigation from a track's menu
+    # ------------------------------------------------------------------
+
+    def _album_of_track(self, track):
+        track_id = track.get("id")
+
+        for artist in self.artists:
+            for album in artist["albums"]:
+                if any(candidate.get("id") == track_id for candidate in album["tracks"]):
+                    return album
+
+        return None
+
+    def _artist_of_track(self, track):
+        """The artist page to open for ``track``.
+
+        Pages are per album artist. The track's own artist wins when it has a
+        page (so a compilation track opens its performer); otherwise it is the
+        artist of the album the track is in.
+        """
+        name = str(track.get("artist") or "").casefold()
+
+        for artist in self.artists:
+            if artist["name"].casefold() == name:
+                return artist
+
+        track_id = track.get("id")
+
+        for artist in self.artists:
+            for album in artist["albums"]:
+                if any(candidate.get("id") == track_id for candidate in album["tracks"]):
+                    return artist
+
+        return None
+
+    def open_artist_of_track(self, track):
+        """Show the page of ``track``'s artist. False if unknown."""
+        artist = self._artist_of_track(track)
+
+        if artist is None:
+            return False
+
+        self._show_artist(artist)
+        return True
+
+    def is_album_open(self, track):
+        """True when the page of ``track``'s album is showing."""
+        album = self._album_of_track(track)
+        current = self.current_album
+
+        return (
+            album is not None
+            and current is not None
+            and self.stack.get_visible_child_name() == "album"
+            and (current["artist"].casefold(), current["title"].casefold())
+            == (album["artist"].casefold(), album["title"].casefold())
+        )
+
+    def is_artist_open(self, track):
+        """True when the page of ``track``'s artist is showing."""
+        artist = self._artist_of_track(track)
+        current = self.current_artist
+
+        return (
+            artist is not None
+            and current is not None
+            and self.stack.get_visible_child_name() == "artist"
+            and current["name"].casefold() == artist["name"].casefold()
+        )
 
     def _build_header(self):
         header = Gtk.Box(
@@ -192,11 +270,7 @@ class ArtistsView(Gtk.Box):
         artist_labels.set_valign(Gtk.Align.START)
         artist_labels.set_hexpand(True)
 
-        self.artist_name = EditableValue(
-            self._on_edit_artist_clicked,
-            "Rename artist",
-            css_classes=("title-1",),
-        )
+        self.artist_name = value_label(css_classes=("title-1",))
 
         self.artist_album_count = Gtk.Label(xalign=0)
         self.artist_album_count.add_css_class("dim-label")
@@ -211,12 +285,31 @@ class ArtistsView(Gtk.Box):
             self._on_artist_play_clicked,
         )
 
+        artist_edit_button = Gtk.Button(label="Edit")
+        artist_edit_button.connect(
+            "clicked",
+            lambda _button: self._on_edit_artist_clicked(),
+        )
+
+        artist_actions = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        artist_actions.set_halign(Gtk.Align.START)
+        artist_actions.append(self.artist_play_button)
+        artist_actions.append(artist_edit_button)
+
         artist_labels.append(self.artist_name)
         artist_labels.append(self.artist_album_count)
         artist_labels.append(self.artist_track_count)
-        artist_labels.append(self.artist_play_button)
+        artist_labels.append(artist_actions)
 
-        self.artist_info.append(self.artist_artwork_stack)
+        self.artist_info.append(
+            with_edit_button(
+                self.artist_artwork_stack,
+                self._on_change_artist_image_clicked,
+            )
+        )
         self.artist_info.append(artist_labels)
         self.artist_page.append(self.artist_info)
 
@@ -311,15 +404,9 @@ class ArtistsView(Gtk.Box):
         labels.set_valign(Gtk.Align.START)
         labels.set_hexpand(True)
 
-        self.album_title = EditableValue(
-            self._on_edit_artist_album_clicked,
-            "Rename album",
-            css_classes=("title-1",),
-        )
+        self.album_title = value_label(css_classes=("title-1",))
 
-        self.album_artist = EditableValue(
-            self._on_edit_artist_album_artist_clicked,
-            "Change album artist",
+        self.album_artist = value_label(
             css_classes=("title-3", "dim-label"),
         )
 
@@ -333,16 +420,35 @@ class ArtistsView(Gtk.Box):
             self._on_album_play_clicked,
         )
 
+        album_edit_button = Gtk.Button(label="Edit")
+        album_edit_button.connect(
+            "clicked",
+            lambda _button: self._on_edit_artist_album_clicked(),
+        )
+
+        album_actions = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        album_actions.set_halign(Gtk.Align.START)
+        album_actions.append(self.album_play_button)
+        album_actions.append(album_edit_button)
+
         labels.append(self.album_title)
         labels.append(self.album_artist)
         labels.append(self.album_track_count)
-        labels.append(self.album_play_button)
+        labels.append(album_actions)
 
         # Sort selector: bottom-right of the header, right above the list.
         self.album_sort_dropdown.set_valign(Gtk.Align.END)
         self.album_sort_dropdown.set_halign(Gtk.Align.END)
 
-        info.append(self.album_artwork_stack)
+        info.append(
+            with_edit_button(
+                self.album_artwork_stack,
+                self._on_change_artist_album_image_clicked,
+            )
+        )
         info.append(labels)
         info.append(self.album_sort_dropdown)
         self.album_page.append(info)
@@ -457,9 +563,17 @@ class ArtistsView(Gtk.Box):
             artist["track_count"] = sum(
                 len(album["tracks"]) for album in albums
             )
-            artist["artwork_path"] = (
-                albums[0]["artwork_path"] if albums else None
-            )
+            # The artist's own picture (an image in their folder) if they
+            # have one, otherwise the cover of their first album.
+            artist["artwork_path"] = next(
+                (
+                    track["artist_artwork_path"]
+                    for album in albums
+                    for track in album["tracks"]
+                    if track.get("artist_artwork_path")
+                ),
+                None,
+            ) or (albums[0]["artwork_path"] if albums else None)
 
             self.artists.append(artist)
 
@@ -510,6 +624,8 @@ class ArtistsView(Gtk.Box):
             describe=self._describe_artist,
             on_play=self._toggle_artist,
             play_tooltip="Play artist",
+            on_edit=self._on_edit_artist_from_grid,
+            open_in_menu=True,
         )
 
         total = len(self.artists)
@@ -536,6 +652,10 @@ class ArtistsView(Gtk.Box):
             self.count_label.set_text(f"{visible} of {total} artists")
 
         self._update_play_buttons()
+
+    def _on_edit_artist_from_grid(self, artist):
+        if self.on_rename_artist is not None:
+            self.on_rename_artist(artist)
 
     @staticmethod
     def _describe_artist(artist):
@@ -899,6 +1019,20 @@ class ArtistsView(Gtk.Box):
     def _on_edit_artist_album_clicked(self):
         if self.current_album is not None and self.on_rename_album is not None:
             self.on_rename_album(self.current_album)
+
+    def _on_change_artist_image_clicked(self):
+        if (
+                self.current_artist is not None
+                and self.on_change_artist_image is not None
+        ):
+            self.on_change_artist_image(self.current_artist)
+
+    def _on_change_artist_album_image_clicked(self):
+        if (
+                self.current_album is not None
+                and self.on_change_album_image is not None
+        ):
+            self.on_change_album_image(self.current_album)
 
     def _on_edit_artist_album_artist_clicked(self):
         if (
