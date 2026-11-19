@@ -379,6 +379,207 @@ class LibraryEditor:
                 f'A file named "{title}" already exists in that album.'
             ) from None
 
+    def import_track(
+            self,
+            source: Path,
+            metadata: TrackMetadata,
+            *,
+            image: bytes | None = None,
+            start_time: float | None = None,
+            end_time: float | None = None,
+            kind: str | None = None,
+    ) -> dict:
+        """Add an audio file to the library as a new track.
+
+        The file is *copied* (the original is left where it is) to
+        ``<album artist>/<album>/<title>.<ext>``, or to
+        ``<album artist>/<title>.<ext>`` when the album is empty (a single),
+        with its tags rewritten from ``metadata``. If a file with that name is
+        already there, the copy gets a number, so nothing is ever overwritten.
+
+        ``image`` (raw bytes) is embedded as the track's cover, and
+        ``start_time`` / ``end_time`` / ``kind`` are stored like the edit
+        window does.
+
+        Returns ``{"id": the new track's id, "errors": [...]}``; the errors
+        are about the extras (cover, range, kind), which the track can do
+        without. If the file itself cannot be added, ``LibraryEditError`` is
+        raised and nothing is left behind.
+        """
+        source = Path(source).expanduser().resolve()
+
+        if not source.is_file():
+            raise LibraryEditError(f"{source.name}: the file no longer exists")
+
+        if source.suffix.casefold() not in SUPPORTED_EXTENSIONS:
+            raise LibraryEditError(
+                f"{source.name}: not a supported audio file"
+            )
+
+        try:
+            source.relative_to(self.music_folder)
+        except ValueError:
+            pass
+        else:
+            raise LibraryEditError(
+                f"{source.name}: this file is already in the library"
+            )
+
+        folder = self.music_folder / _sanitize_name(
+            metadata.album_artist or metadata.artist
+        )
+
+        if metadata.album.strip():
+            folder = folder / _sanitize_name(metadata.album)
+
+        destination = self._unique_destination(
+            folder / f"{_sanitize_name(metadata.title)}{source.suffix}",
+            set(),
+        )
+        self._inside_library(destination)
+
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            write_metadata(destination, metadata)
+
+            stat = destination.stat()
+            self.database.save_track(
+                path=destination,
+                metadata=metadata,
+                file_size=stat.st_size,
+                file_mtime=stat.st_mtime,
+            )
+
+            track = self.database.get_track_by_path(destination)
+
+            if track is None:
+                raise LibraryEditError("it could not be saved to the library")
+
+        except Exception as error:
+            self._discard_import(destination)
+            raise LibraryEditError(f"{source.name}: {error}") from None
+
+        track_id = track["id"]
+        result = {"id": track_id, "errors": []}
+
+        if image:
+            try:
+                result["errors"].extend(
+                    self.set_track_image(track_id, image)["errors"]
+                )
+            except Exception as error:
+                result["errors"].append(f"{source.name}: cover: {error}")
+
+        try:
+            if start_time is not None or end_time is not None:
+                self.database.set_track_range(track_id, start_time, end_time)
+
+            if kind is not None:
+                self.database.set_track_kind(track_id, kind)
+        except Exception as error:
+            result["errors"].append(f"{source.name}: {error}")
+
+        return result
+
+    def _discard_import(self, destination: Path):
+        """Undo a copy that failed half way: the file, and the folders it
+        created, but never the music root itself."""
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        parent = destination.parent
+
+        while parent != self.music_folder:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+
+            parent = parent.parent
+
+    def delete_track(self, track_id: str) -> dict:
+        """Delete a track: its file is moved to the trash, and it leaves the
+        library and every playlist it was in.
+
+        Returns ``{"errors": [...]}`` for the things around the track that
+        could not be tidied up. If the file itself cannot be moved to the
+        trash, ``LibraryEditError`` is raised and nothing is deleted.
+        """
+        track = self.database.get_track(track_id)
+
+        if track is None:
+            raise LibraryEditError("The selected track no longer exists")
+
+        path = self._inside_library(Path(track["path"]))
+        result = {"errors": []}
+
+        if path.exists():
+            self._trash(path)
+
+        self.database.delete_track(track_id)
+        self._remove_emptied_folder(path.parent, result)
+
+        return result
+
+    @staticmethod
+    def _trash(path: Path):
+        from gi.repository import Gio, GLib
+
+        try:
+            Gio.File.new_for_path(str(path)).trash(None)
+        except GLib.Error as error:
+            raise LibraryEditError(
+                f"Could not move {path.name} to the trash: {error.message}"
+            ) from None
+
+    def _remove_emptied_folder(self, folder: Path, result: dict):
+        """Tidy the folder a deleted track was in.
+
+        An album folder left without any audio only holds its cover image,
+        which goes too. An artist's folder is never emptied that way: it
+        holds the artist's own picture. Then every folder left empty is
+        removed, up to (never including) the music folder.
+        """
+        if (
+                folder != self.music_folder
+                and folder.parent != self.music_folder
+                and folder.is_dir()
+        ):
+            try:
+                entries = list(folder.iterdir())
+            except OSError:
+                entries = []
+
+            if not any(
+                    entry.is_file()
+                    and entry.suffix.casefold() in SUPPORTED_EXTENSIONS
+                    for entry in entries
+            ):
+                for entry in entries:
+                    if (
+                            entry.is_file()
+                            and entry.stem.casefold() in FOLDER_IMAGE_STEMS
+                            and entry.suffix.casefold()
+                            in FOLDER_IMAGE_EXTENSIONS
+                    ):
+                        try:
+                            self._trash(entry)
+                        except LibraryEditError as error:
+                            result["errors"].append(str(error))
+
+        parent = folder
+
+        while parent != self.music_folder:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+
+            parent = parent.parent
+
     # ------------------------------------------------------------------
     # Images
     # ------------------------------------------------------------------

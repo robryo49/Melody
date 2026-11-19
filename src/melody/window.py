@@ -19,6 +19,7 @@ from melody.services.collection_actions import (
     show_playlist_picker_dialog,
     show_text_dialog,
     set_track_navigation,
+    set_track_deletion,
 )
 from melody.services.artwork import (
     get_album_artwork_bytes,
@@ -28,6 +29,7 @@ from melody.services.artwork import (
 )
 from melody.services.library_scanner import _sanitize_name
 from melody.services.image_sources import album_sources, artist_sources
+from melody.services.playlist_artwork import set_playlist_cover
 from melody.services.playback_manager import PlaybackManager
 from melody.views import (
     LibraryView,
@@ -38,7 +40,16 @@ from melody.views import (
 )
 from melody.services.compilations import is_compilation
 from melody.services.settings import get_settings
+from melody.import_sources import get_import_sources
+from melody.services.metadata import MetadataError
 from melody.widgets.image_picker import show_image_picker
+from melody.widgets.import_dialogs import (
+    pick_audio_files,
+    show_import_dialog,
+    show_import_preview,
+    show_link_dialog,
+    show_search_dialog,
+)
 from melody.widgets.player_bar import PlayerBar
 
 
@@ -54,6 +65,9 @@ class MelodyWindow(Adw.ApplicationWindow):
         # the scan a Preferences "Rescan" button started is over.
         self._syncing = False
         self._rescan_done = None
+        # Downloads waiting in temporary folders until they have been
+        # imported (see ``_discard_downloads``).
+        self._downloads = []
         self.playback_manager = PlaybackManager()
         self.library_manager = LibraryManager()
         self.database = self.library_manager.database
@@ -95,6 +109,13 @@ class MelodyWindow(Adw.ApplicationWindow):
                 self._edit_track,
                 self._choose_playlist_for_track,
             )
+        # The Library can import music.
+        self.views["Library"].set_import_callback(self._import_music)
+        # The pages of an album, an artist and a playlist can too, and what
+        # they import starts out belonging to them.
+        for name in ("Albums", "Artists", "Playlists"):
+            self.views[name].set_import_callback(self._import_music)
+        set_track_deletion(self._delete_track)
         self.views["Albums"].set_rename_callbacks(
             self._edit_album,
             self._edit_album,
@@ -120,6 +141,9 @@ class MelodyWindow(Adw.ApplicationWindow):
             self._edit_playlist,
             self._choose_playlist_for_track,
             self._edit_track,
+        )
+        self.views["Playlists"].set_image_callback(
+            self._change_playlist_image,
         )
 
         self.navigation_rows = {}
@@ -268,6 +292,7 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.player_bar.update_playback_state
         )
         self.playback_manager.on_error = self._on_playback_error
+        self.player_bar.on_play_idle = self._play_selected_track
 
         layout = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -585,6 +610,277 @@ class MelodyWindow(Adw.ApplicationWindow):
             self, track, save, library_tracks=self.tracks,
         )
 
+    def _delete_track(self, track):
+        """The "Delete" entry of a track's menu: ask, then move the file to the
+        trash and take the track out of the library and its playlists."""
+        # A scan running at the same time could bring the track back, or
+        # replace the pages with a list that still has it.
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        title = str(track.get("title") or "this track")
+
+        dialog = Adw.MessageDialog.new(
+            self,
+            "Delete track?",
+            f"“{title}” will be moved to the trash and removed from your "
+            "library and from its playlists.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance(
+            "delete",
+            Adw.ResponseAppearance.DESTRUCTIVE,
+        )
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect(
+            "response",
+            lambda _dialog, response: self._on_delete_track_response(
+                track, response,
+            ),
+        )
+        dialog.present()
+
+    def _on_delete_track_response(self, track, response):
+        if response != "delete":
+            return
+
+        try:
+            result = self.library_editor.delete_track(track["id"])
+        except Exception as error:
+            show_error_dialog(self, "Could not delete track", error)
+            return
+
+        # A deleted track must not keep playing.
+        current = self.playback_manager.current_track
+
+        if current is not None and current.get("id") == track.get("id"):
+            self.playback_manager.stop()
+            self.player_bar.set_track(None)
+
+        if result.get("errors"):
+            show_error_dialog(
+                self,
+                "The track was deleted, but not everything was cleaned up",
+                "\n".join(result["errors"]),
+            )
+
+        self._reload_library_from_database()
+
+    # ------------------------------------------------------------------
+    # Importing music
+    # ------------------------------------------------------------------
+
+    def _import_music(self, context=None):
+        """An Import button: ask how, then import.
+
+        ``context`` says where the button was: ``artist`` and ``album`` are
+        the starting values of what is imported, and ``playlist_id`` is a
+        playlist to add it to. The Library has no context.
+        """
+        # Importing writes to the library and the database, which a scan
+        # running at the same time would undo.
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        context = dict(context or {})
+        show_import_dialog(
+            self,
+            get_import_sources(),
+            lambda source: self._import_from(source, context),
+        )
+
+    def _show_library_busy(self):
+        show_error_dialog(
+            self,
+            "The library is busy",
+            "Wait for the library scan to finish, then try again.",
+        )
+
+    def _import_from(self, source, context):
+        """Go on with the import source the person picked: each ``kind`` of
+        source has its own windows (see ``melody.import_sources``)."""
+        if source.kind == "files":
+            self._import_from_files(source, context)
+        elif source.kind == "link":
+            self._import_from_link(source, context)
+        elif source.kind == "search":
+            self._import_from_search(source, context)
+
+    def _import_from_files(self, source, context):
+        pick_audio_files(
+            self,
+            lambda paths: self._on_import_files_picked(source, paths, context),
+        )
+
+    def _on_import_files_picked(self, source, paths, context):
+        pending, errors = source.load(paths)
+        self._review_pending_tracks(pending, errors, context)
+
+    def _import_from_search(self, source, context):
+        # Picking a result goes on like a pasted link, with its address
+        # already filled in.
+        show_search_dialog(
+            self,
+            source,
+            lambda result: self._import_from_link(
+                source,
+                context,
+                url=result.url,
+            ),
+        )
+
+    def _import_from_link(self, source, context, url=None):
+        show_link_dialog(
+            self,
+            source,
+            lambda download: self._on_downloaded(source, download, context),
+            discard=lambda download: download.cleanup(),
+            initial_url=url,
+        )
+
+    def _on_downloaded(self, source, download, context):
+        try:
+            pending = [source.to_pending(download)]
+            errors = []
+        except (MetadataError, OSError) as error:
+            download.cleanup()
+            pending = []
+            errors = [f"{download.path.name}: {error}"]
+        else:
+            # The audio stays in its temporary folder until it has been
+            # copied into the library (or the import is given up).
+            self._downloads.append(download)
+
+        self._review_pending_tracks(pending, errors, context)
+
+    def _review_pending_tracks(self, pending, errors, context):
+        """Show what is about to be imported, whether it came from files or
+        from a link: one track goes straight to its edit window, several to
+        a preview of them all."""
+        if not pending:
+            show_error_dialog(
+                self,
+                "Nothing to import",
+                "\n".join(errors) or "No file was selected.",
+            )
+            return
+
+        # Start from the page the import was made from. The fields stay
+        # editable in the windows below.
+        for item in pending:
+            item.set_defaults(
+                artist=context.get("artist"),
+                album=context.get("album"),
+            )
+
+        playlist_id = context.get("playlist_id")
+
+        if len(pending) == 1:
+            # One file: straight to its edit window. Save adds it to the
+            # library, Cancel adds nothing.
+            item = pending[0]
+
+            def save(values):
+                item.apply(values)
+                self._import_tracks(pending, errors, playlist_id)
+
+            show_edit_track_dialog(
+                self,
+                item.as_track(),
+                save,
+                library_tracks=self.tracks,
+                window_title="Import track",
+                hint=(
+                    "The file is copied into your library, named after "
+                    "its title, artist and album. Leave the album empty "
+                    "for a single: it is then kept in the artist's folder."
+                ),
+                allow_unchanged=True,
+            )
+            return
+
+        # Several files: a preview of them all, each editable, then Save adds
+        # every one of them.
+        show_import_preview(
+            self,
+            pending,
+            self.tracks,
+            lambda items: self._import_tracks(items, errors, playlist_id),
+        )
+
+    def _import_tracks(self, pending, earlier_errors=(), playlist_id=None):
+        """Copy the pending files into the library and refresh the pages.
+
+        ``earlier_errors`` are files that could not even be read: they are
+        reported together with the ones that fail here. With ``playlist_id``,
+        every track that makes it into the library is added to that playlist.
+        """
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        errors = list(earlier_errors)
+        imported = 0
+
+        for item in pending:
+            try:
+                result = self.library_editor.import_track(
+                    item.path,
+                    item.final_metadata(),
+                    image=item.image,
+                    start_time=item.start_time,
+                    end_time=item.end_time,
+                    kind=item.kind,
+                )
+            except Exception as error:
+                errors.append(str(error))
+                continue
+
+            imported += 1
+            errors.extend(result["errors"])
+
+            if playlist_id is not None:
+                try:
+                    self.database.add_track_to_playlist(
+                        playlist_id, result["id"],
+                    )
+                except Exception as error:
+                    errors.append(
+                        f"{item.path.name}: could not add it to the "
+                        f"playlist: {error}"
+                    )
+
+        self._discard_downloads()
+
+        if imported:
+            # The new tracks show up at once. Their artwork is looked up by
+            # a scan in the background (it may need the network, which must
+            # not freeze the window).
+            self._reload_library_from_database()
+            self._rescan_library()
+
+        if errors:
+            show_error_dialog(
+                self,
+                (
+                    "Some files could not be imported"
+                    if imported else "Could not import"
+                ),
+                "\n".join(errors),
+            )
+
+    def _discard_downloads(self):
+        """Delete the temporary folders of the downloads: what they hold has
+        been copied into the library, or the import was cancelled."""
+        downloads, self._downloads = self._downloads, []
+
+        for download in downloads:
+            download.cleanup()
+
     def _create_playlist_for_track(self, track):
         def create(name):
             try:
@@ -611,11 +907,26 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _edit_playlist(self, playlist):
         def save(values):
+            image = values.get("image")
+
             try:
-                self.database.rename_playlist(playlist["id"], values["name"])
-                self.views["Playlists"].refresh()
+                if values["name"] != playlist["name"]:
+                    self.database.rename_playlist(
+                        playlist["id"], values["name"],
+                    )
             except Exception as error:
                 show_error_dialog(self, "Could not edit playlist", error)
+                return
+
+            if image:
+                try:
+                    set_playlist_cover(self.database, playlist["id"], image)
+                except Exception as error:
+                    show_error_dialog(
+                        self, "Could not change the playlist's image", error,
+                    )
+
+            self.views["Playlists"].refresh()
 
         show_edit_playlist_dialog(
             self,
@@ -623,6 +934,23 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.views["Playlists"].cover_for(playlist),
             save,
         )
+
+    def _change_playlist_image(self, playlist):
+        """The edit button over a playlist's picture: pick, then apply right
+        away (there is no Save step outside the edit window). A playlist has
+        no suggestions: the person picks an image file."""
+        def apply(data):
+            try:
+                set_playlist_cover(self.database, playlist["id"], data)
+            except Exception as error:
+                show_error_dialog(
+                    self, "Could not change the playlist's image", error,
+                )
+                return
+
+            self.views["Playlists"].refresh()
+
+        show_image_picker(self, [], apply)
 
     def _edit_album(self, album):
         def save(values):
@@ -946,6 +1274,20 @@ class MelodyWindow(Adw.ApplicationWindow):
         self._finish_sync()
         return GLib.SOURCE_REMOVE
 
+    def _play_selected_track(self):
+        """Play button with nothing loaded: play the track selected on the
+        page showing (Library or Compilations), like a double click on it.
+
+        False when there is no such track, so the button does what it
+        normally does.
+        """
+        page = self.content_stack.get_visible_child_name()
+
+        if page in ("library", "compilations"):
+            return self.views[page.capitalize()].play_selected()
+
+        return False
+
     def _on_playback_error(self, message):
         self.sync_status.set_visible(True)
         self.sync_status_label.set_text(
@@ -958,4 +1300,5 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, window):
         self.playback_manager.close()
+        self._discard_downloads()
         return False

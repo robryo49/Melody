@@ -19,37 +19,14 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gtk, Pango
 
 from melody.services.collection_actions import attach_context_menu
+from melody.widgets.cover_style import (
+    COVER_RADIUS,
+    install_cover_css as _install_css,
+)
 
 COVER_SIZE = 160
-COVER_RADIUS = 12
 GRID_SPACING = 24
 GRID_MARGIN = 24
-
-_CSS = f"""
-.cover-art {{
-    border-radius: {COVER_RADIUS}px;
-}}
-.cover-placeholder {{
-    background-color: alpha(currentColor, 0.08);
-}}
-"""
-_css_installed = False
-
-
-def _install_css():
-    """Register the cover styles once for the whole display."""
-    global _css_installed
-    if _css_installed:
-        return
-    display = Gdk.Display.get_default()
-    if display is None:
-        return
-    provider = Gtk.CssProvider()
-    provider.load_from_string(_CSS)
-    Gtk.StyleContext.add_provider_for_display(
-        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-    )
-    _css_installed = True
 
 
 @lru_cache(maxsize=512)
@@ -85,7 +62,7 @@ def load_cover_texture(path, size=COVER_SIZE * 2):
 
 
 class CollectionCard(Gtk.Box):
-    """A single square-cover tile."""
+    """A single cover tile: square, or round with ``round_cover``."""
 
     def __init__(
             self,
@@ -98,6 +75,8 @@ class CollectionCard(Gtk.Box):
             on_play,
             on_edit=None,
             on_open=None,
+            on_delete=None,
+            round_cover=False,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -118,7 +97,8 @@ class CollectionCard(Gtk.Box):
         cover.set_overflow(Gtk.Overflow.HIDDEN)
         # No "card" class: it paints a background/border/shadow behind the
         # artwork, which peeks out of artwork that has its own rounded corners.
-        cover.add_css_class("cover-art")
+        # A round cover is cut to its circle by the same clipping.
+        cover.add_css_class("round-cover" if round_cover else "cover-art")
 
         texture = load_cover_texture(artwork_path)
         if texture is not None:
@@ -139,8 +119,10 @@ class CollectionCard(Gtk.Box):
         self.play_button.add_css_class("osd")
         self.play_button.set_halign(Gtk.Align.END)
         self.play_button.set_valign(Gtk.Align.END)
-        self.play_button.set_margin_end(8)
-        self.play_button.set_margin_bottom(8)
+        # In the corner of a circle the button would be cut off: bring it in.
+        play_margin = 24 if round_cover else 8
+        self.play_button.set_margin_end(play_margin)
+        self.play_button.set_margin_bottom(play_margin)
         self.play_button.set_tooltip_text(play_tooltip)
         self.play_button.set_visible(False)
         self.play_button.connect("clicked", lambda _b: on_play(self.item))
@@ -184,6 +166,12 @@ class CollectionCard(Gtk.Box):
                     entries.append(("Open", lambda: on_open(self.item)))
 
                 entries.append(("Edit…", lambda: on_edit(self.item)))
+
+                if on_delete is not None:
+                    entries.append(
+                        ("Delete", lambda: on_delete(self.item))
+                    )
+
                 return entries
 
             attach_context_menu(self, menu_entries)
@@ -218,7 +206,7 @@ class CollectionCard(Gtk.Box):
 class CollectionGrid(Gtk.ScrolledWindow):
     """Scrollable grid of ``CollectionCard`` tiles that wraps to the width."""
 
-    def __init__(self, on_open, placeholder_icon):
+    def __init__(self, on_open, placeholder_icon, round_covers=False):
         super().__init__()
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.set_vexpand(True)
@@ -226,6 +214,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
         self.cards = []
         self._on_open = on_open
         self._placeholder_icon = placeholder_icon
+        self._round_covers = round_covers
 
         self.flow_box = Gtk.FlowBox()
         self.flow_box.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -252,6 +241,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
             play_tooltip,
             on_edit=None,
             open_in_menu=False,
+            on_delete=None,
     ):
         """Rebuild the grid.
 
@@ -260,7 +250,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
         ``on_edit(item)``, if given, adds an "Edit…" entry to the cards'
         right-click menu (which also has Play/Pause). With ``open_in_menu``
         the menu also gets an "Open" entry, which does what clicking the
-        card does.
+        card does. With ``on_delete(item)`` it gets a "Delete" entry too.
         """
         self.flow_box.remove_all()
         self.cards = []
@@ -277,6 +267,8 @@ class CollectionGrid(Gtk.ScrolledWindow):
                 on_play,
                 on_edit,
                 self._on_open if open_in_menu else None,
+                on_delete,
+                round_cover=self._round_covers,
             )
             self.flow_box.append(card)
             self.cards.append(card)

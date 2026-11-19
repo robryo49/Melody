@@ -19,6 +19,7 @@ from melody.services.settings import get_settings
 from melody.services.singles import has_album
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
+from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.value_label import value_label
 
 
@@ -37,6 +38,7 @@ class AlbumsView(Gtk.Box):
         self.on_rename_album = None
         self.on_rename_album_artist = None
         self.on_change_album_image = None
+        self.on_import = None
 
         self._build_header()
         self._build_grid()
@@ -65,6 +67,12 @@ class AlbumsView(Gtk.Box):
 
     def set_image_callbacks(self, album_callback):
         self.on_change_album_image = album_callback
+
+    def set_import_callback(self, callback):
+        """``callback(context)`` imports music from an album's page; the
+        context names the album and its artist, the starting values of what
+        is imported."""
+        self.on_import = callback
 
     # ------------------------------------------------------------------
     # Navigation from a track's menu
@@ -222,19 +230,65 @@ class AlbumsView(Gtk.Box):
         self.grid_page.append(self.grid_stack)
 
     def set_tracks(self, tracks):
-        selected_track_id = None
-        if self.current_album and self.current_album.get("tracks"):
-            selected_track_id = self.current_album["tracks"][0].get("id")
+        # Whatever is showing before the refresh (an edit window was just
+        # saved, the library was rescanned...) is showing again after it: the
+        # grid stays the grid, an open album stays open. The album is found
+        # again by the tracks it held rather than by its name, because the
+        # edit may well have renamed it.
+        open_ids = None
+
+        if (
+                self.current_album is not None
+                and self.stack.get_visible_child_name() == "details"
+        ):
+            open_ids = {
+                track.get("id") for track in self.current_album["tracks"]
+            }
 
         self.tracks = list(tracks)
+        self.current_album = None
         self._build_albums()
         self._refresh_grid()
 
-        if selected_track_id is not None:
-            for album in self.albums:
-                if any(track.get("id") == selected_track_id for track in album["tracks"]):
-                    self._show_album(album)
-                    break
+        if open_ids:
+            album = self._find_album_by_tracks(open_ids)
+
+            if album is not None:
+                self._show_album(album)
+
+    def _find_album_by_tracks(self, track_ids):
+        """The album that now holds most of the tracks in ``track_ids``.
+
+        Editing a track can move it out of its album: the album it was shown
+        in is still the one holding the others. If the album was renamed,
+        merged or moved to another artist, all of its tracks went along, so it
+        is found the same way. None if none of them is left in an album.
+        """
+        best, best_count = None, 0
+
+        for album in self.albums:
+            count = sum(
+                1 for track in album["tracks"]
+                if track.get("id") in track_ids
+            )
+
+            if count > best_count:
+                best, best_count = album, count
+
+        if best is not None:
+            return best
+
+        # Not listed: an album that only holds compilations, which the
+        # setting keeps out of the albums. It is still reachable, so build it
+        # from one of its tracks.
+        for track in self.tracks:
+            if track.get("id") in track_ids:
+                album = self._album_of_track(track)
+
+                if album is not None:
+                    return album
+
+        return None
 
     def _build_albums(self):
         albums = {}
@@ -433,6 +487,7 @@ class AlbumsView(Gtk.Box):
         actions.set_halign(Gtk.Align.START)
         actions.append(self.details_play_button)
         actions.append(edit_button)
+        actions.append(create_import_button(self._on_import_clicked))
 
         info_labels.append(self.details_album_title)
         info_labels.append(self.details_artist)
@@ -564,6 +619,13 @@ class AlbumsView(Gtk.Box):
         if self.current_album is not None and self.on_rename_album is not None:
             self.on_rename_album(self.current_album)
 
+    def _on_import_clicked(self):
+        if self.current_album is not None and self.on_import is not None:
+            self.on_import({
+                "artist": self.current_album["artist"],
+                "album": self.current_album["title"],
+            })
+
     def _on_change_album_image_clicked(self):
         if (
                 self.current_album is not None
@@ -668,4 +730,6 @@ class AlbumsView(Gtk.Box):
         self._refresh_grid()
 
     def _on_back_clicked(self, button):
+        # No album is open any more: a refresh must not bring it back.
+        self.current_album = None
         self.stack.set_visible_child_name("grid")

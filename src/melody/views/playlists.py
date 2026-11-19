@@ -12,8 +12,11 @@ from melody.services.collection_actions import (
     toggle_track_playback,
     track_is_playing,
 )
+from melody.services.playlist_artwork import get_playlist_cover
 from melody.services.track_range import track_length
 from melody.widgets.collection_grid import CollectionGrid
+from melody.widgets.cover_edit_button import with_edit_button
+from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.value_label import value_label
 
 
@@ -35,6 +38,8 @@ class PlaylistsView(Gtk.Box):
         self.on_rename_playlist = None
         self.on_add_to_playlist = None
         self.on_edit_track = None
+        self.on_import = None
+        self.on_change_image = None
 
         self._build_header()
         self._build_grid()
@@ -74,6 +79,27 @@ class PlaylistsView(Gtk.Box):
         self.on_rename_playlist = rename_playlist
         self.on_add_to_playlist = add_to_playlist
         self.on_edit_track = edit_track
+
+    def set_import_callback(self, callback):
+        """``callback(context)`` imports music from a playlist's page; the
+        context names the playlist, so what is imported is added to it."""
+        self.on_import = callback
+
+    def set_image_callback(self, callback):
+        """``callback(playlist)`` lets the person pick a new picture for a
+        playlist (the edit button over its cover)."""
+        self.on_change_image = callback
+
+    def library_tracks_of(self, playlist):
+        """The playlist's tracks as the library has them, with their artwork
+        (what the picture suggestions are made from)."""
+        by_id = {track.get("id"): track for track in self.tracks}
+
+        return [
+            by_id[track["id"]]
+            for track in self.database.get_playlist_tracks(playlist["id"])
+            if track["id"] in by_id
+        ]
 
     # ------------------------------------------------------------------
     # Header and grid
@@ -117,6 +143,15 @@ class PlaylistsView(Gtk.Box):
             icon_name="view-list-symbolic",
         )
 
+        # With no playlist the header (and its + button) is not shown, so the
+        # page itself offers the way to create the first one.
+        empty_create_button = Gtk.Button(label="Create playlist")
+        empty_create_button.add_css_class("pill")
+        empty_create_button.add_css_class("suggested-action")
+        empty_create_button.set_halign(Gtk.Align.CENTER)
+        empty_create_button.connect("clicked", self._on_create_clicked)
+        self.empty_page.set_child(empty_create_button)
+
         self.grid_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid_page.append(self.grid_header)
         self.grid_page.append(self.grid)
@@ -124,6 +159,14 @@ class PlaylistsView(Gtk.Box):
     def refresh(self):
         if self.database is None:
             return
+
+        # A playlist is only reopened if its page is the one showing: after an
+        # edit window is saved from the grid, the grid stays the grid, even
+        # if a playlist was opened earlier.
+        details_open = (
+            self.current_playlist is not None
+            and self.stack.get_visible_child_name() == "details"
+        )
 
         self.playlists = self.database.get_playlists()
         self._refresh_grid()
@@ -133,7 +176,7 @@ class PlaylistsView(Gtk.Box):
             self.current_tracks = []
             self.stack.set_visible_child_name("empty")
 
-        elif self.current_playlist is not None:
+        elif details_open:
             refreshed = self.database.get_playlist(self.current_playlist["id"])
 
             if refreshed:
@@ -144,6 +187,8 @@ class PlaylistsView(Gtk.Box):
                 self.stack.set_visible_child_name("grid")
 
         else:
+            self.current_playlist = None
+            self.current_tracks = []
             self.stack.set_visible_child_name("grid")
 
         self._update_play_buttons()
@@ -171,8 +216,12 @@ class PlaylistsView(Gtk.Box):
                         if playlist_tracks
                         else None
                     ) or {}
+            # The picture chosen for the playlist comes first, then the cover
+            # of its first track.
             self._playlist_covers[playlist["id"]] = (
-                    first.get("album_artwork_path") or first.get("artwork_path")
+                    get_playlist_cover(self.database, playlist["id"])
+                    or first.get("album_artwork_path")
+                    or first.get("artwork_path")
             )
 
         self.grid.populate(
@@ -181,6 +230,8 @@ class PlaylistsView(Gtk.Box):
             on_play=self._toggle_playlist,
             play_tooltip="Play playlist",
             on_edit=self._on_edit_playlist_from_grid,
+            open_in_menu=True,
+            on_delete=self._delete_playlist,
         )
 
         self.count_label.set_text(
@@ -289,6 +340,7 @@ class PlaylistsView(Gtk.Box):
         actions.set_halign(Gtk.Align.START)
         actions.append(self.details_play_button)
         actions.append(edit_button)
+        actions.append(create_import_button(self._on_import_clicked))
         actions.append(delete_button)
 
         labels.append(self.name_label)
@@ -299,7 +351,9 @@ class PlaylistsView(Gtk.Box):
         self.sort_dropdown.set_valign(Gtk.Align.END)
         self.sort_dropdown.set_halign(Gtk.Align.END)
 
-        info.append(self.cover_stack)
+        info.append(
+            with_edit_button(self.cover_stack, self._on_change_cover_clicked)
+        )
         info.append(labels)
         info.append(self.sort_dropdown)
         self.details_page.append(info)
@@ -352,7 +406,8 @@ class PlaylistsView(Gtk.Box):
 
         first = tracks[0] if tracks else None
         artwork_path = (
-                (first or {}).get("album_artwork_path")
+                get_playlist_cover(self.database, playlist["id"])
+                or (first or {}).get("album_artwork_path")
                 or (first or {}).get("artwork_path")
         )
 
@@ -525,13 +580,14 @@ class PlaylistsView(Gtk.Box):
                 break
 
     def _on_delete_clicked(self, button):
-        if self.current_playlist is None:
-            return
+        if self.current_playlist is not None:
+            self._delete_playlist(self.current_playlist)
 
+    def _delete_playlist(self, playlist):
         dialog = Adw.MessageDialog.new(
             self.get_root(),
             "Delete playlist?",
-            f'Are you sure you want to delete "{self.current_playlist["name"]}"?',
+            f'Are you sure you want to delete "{playlist["name"]}"?',
         )
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("delete", "Delete")
@@ -541,16 +597,27 @@ class PlaylistsView(Gtk.Box):
         )
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
-        dialog.connect("response", self._on_delete_response)
+        dialog.connect(
+            "response",
+            lambda _dialog, response: self._on_delete_response(
+                playlist, response
+            ),
+        )
         dialog.present()
 
-    def _on_delete_response(self, dialog, response):
-        if response != "delete" or self.current_playlist is None:
+    def _on_delete_response(self, playlist, response):
+        if response != "delete":
             return
 
-        self.database.delete_playlist(self.current_playlist["id"])
-        self.current_playlist = None
-        self.current_tracks = []
+        self.database.delete_playlist(playlist["id"])
+
+        if (
+                self.current_playlist is not None
+                and self.current_playlist["id"] == playlist["id"]
+        ):
+            self.current_playlist = None
+            self.current_tracks = []
+
         self.refresh()
 
     # ------------------------------------------------------------------
@@ -577,6 +644,17 @@ class PlaylistsView(Gtk.Box):
         ):
             self.on_rename_playlist(self.current_playlist)
 
+    def _on_import_clicked(self):
+        if self.current_playlist is not None and self.on_import is not None:
+            self.on_import({"playlist_id": self.current_playlist["id"]})
+
+    def _on_change_cover_clicked(self):
+        if (
+                self.current_playlist is not None
+                and self.on_change_image is not None
+        ):
+            self.on_change_image(self.current_playlist)
+
     # ------------------------------------------------------------------
     # Navigation and sorting
     # ------------------------------------------------------------------
@@ -585,6 +663,9 @@ class PlaylistsView(Gtk.Box):
         self._refresh_detail_tracks()
 
     def _on_back_clicked(self, button):
+        # No playlist is open any more: a refresh must not bring it back.
+        self.current_playlist = None
+        self.current_tracks = []
         self.stack.set_visible_child_name("grid")
 
     @staticmethod

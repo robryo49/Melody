@@ -23,7 +23,9 @@ from melody.services.image_sources import (
     album_sources,
     artist_sources,
     library_album_source,
+    playlist_sources,
 )
+from melody.widgets.cover_style import install_cover_css
 from melody.widgets.image_picker import show_image_picker, texture_from_bytes
 from melody.widgets.range_selector import TimeRangeSelector
 
@@ -563,6 +565,8 @@ def show_edit_dialog(
         apply_artwork=False,
         range_spec=None,
         compilation_spec=None,
+        allow_unchanged=False,
+        round_cover=False,
 ):
     """Open a window with a cover on the left and editable fields on the right.
 
@@ -596,6 +600,13 @@ def show_edit_dialog(
     "kind": the track's current kind, "tooltip": text}``) a "Compilation"
     checkbox is added. ``values["kind"]`` is then given to ``callback``:
     ``None`` (decided by length), ``"track"`` or ``"compilation"``.
+
+    With ``round_cover`` the cover is shown as a circle (an artist's
+    picture).
+
+    Normally Save stays disabled until something has changed. With
+    ``allow_unchanged`` it is enabled as soon as the fields are valid (for a
+    window that creates something instead of editing it).
     """
     keys = tuple(spec["key"] for spec in specs)
     # A field marked "optional" may be left empty (a track's album, for a
@@ -632,12 +643,13 @@ def show_edit_dialog(
     cover_size = 220
     GAP = 24
     FORM_WIDTH = 380
-    # Room for the fields, the hint, and (when a field has suggestions) the
-    # dropdown below the last one.
+    # Room for the fields, the "Compilation" checkbox that sits under them,
+    # and the hint. The suggestion dropdown floats over the form, so it needs
+    # no room of its own.
     FORM_HEIGHT = max(
         cover_size,
         len(specs) * 86 - 16
-        + (204 if any(spec.get("noun") for spec in specs) else 0)
+        + (44 if compilation_spec else 0)
         + (60 if hint else 0),
     )
 
@@ -647,11 +659,18 @@ def show_edit_dialog(
     cover.set_size_request(cover_size, cover_size)
 
     placeholder = Gtk.Image.new_from_icon_name(placeholder_icon)
-    placeholder.set_pixel_size(80)
+    # The music note of a track is drawn about 30% smaller than the other
+    # placeholders, so it does not fill the cover's area.
+    placeholder.set_pixel_size(
+        56 if placeholder_icon == "audio-x-generic-symbolic" else 80
+    )
 
     cover_stack = Gtk.Stack()
     cover_stack.add_css_class("card")
     cover_stack.set_overflow(Gtk.Overflow.HIDDEN)
+    if round_cover:
+        install_cover_css()
+        cover_stack.add_css_class("round-cover")
     cover_stack.set_size_request(cover_size, cover_size)
     cover_stack.set_halign(Gtk.Align.START)
     cover_stack.set_valign(Gtk.Align.START)
@@ -714,8 +733,10 @@ def show_edit_dialog(
         edit_image_button.add_css_class("osd")
         edit_image_button.set_halign(Gtk.Align.END)
         edit_image_button.set_valign(Gtk.Align.END)
-        edit_image_button.set_margin_end(8)
-        edit_image_button.set_margin_bottom(8)
+        # Further in on a round cover, so the button stays on the picture.
+        edge = 28 if round_cover else 8
+        edit_image_button.set_margin_end(edge)
+        edit_image_button.set_margin_bottom(edge)
         edit_image_button.set_tooltip_text("Change image")
         edit_image_button.set_visible(False)
         cover_overlay.add_overlay(edit_image_button)
@@ -833,6 +854,8 @@ def show_edit_dialog(
         compilation_check.set_active(compilation_initial)
         compilation_check.set_halign(Gtk.Align.START)
         compilation_check.set_tooltip_text(compilation_spec.get("tooltip"))
+        # Right under the fields, with the track's other info.
+        form.append(compilation_check)
 
     def compilation_changed():
         return (
@@ -865,7 +888,8 @@ def show_edit_dialog(
 
         values = current_values()
         return all(values[key] for key in required_keys) and (
-            values != original
+            allow_unchanged
+            or values != original
             or pending["data"] is not None
             or apply_state["on"]
             or range_changed()
@@ -935,19 +959,18 @@ def show_edit_dialog(
     save_button.connect("clicked", on_save)
     _close_on_escape(window)
 
-    # Under both columns, from top to bottom: the "Compilation" checkbox,
-    # then the start / end selector at the very bottom of the window.
+    # Under both columns, at the very bottom of the window: the start / end
+    # selector (the "Compilation" checkbox is with the fields, above).
     extras = []
-
-    if compilation_check is not None:
-        extras.append(compilation_check)
 
     if selector is not None:
         extras.append(selector)
 
     body = content
     if extras:
-        content.set_margin_bottom(16)
+        # The selector sits right under the columns, with only the usual gap
+        # between the two.
+        content.set_margin_bottom(0)
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         body.append(content)
@@ -965,7 +988,16 @@ def show_edit_dialog(
     fields[keys[0]].grab_focus(show_suggestions=False)
 
 
-def show_edit_track_dialog(parent, track, callback, library_tracks=()):
+def show_edit_track_dialog(
+        parent,
+        track,
+        callback,
+        library_tracks=(),
+        *,
+        window_title="Edit track",
+        hint=None,
+        allow_unchanged=False,
+):
     """Edit a track's title (file name), artist and album.
 
     The artist and album fields list what already exists in
@@ -973,6 +1005,10 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
     ``{"title": ..., "artist": ..., "album": ..., "start_time": ...,
     "end_time": ...}`` (the last two are ``None`` for the very start / end of
     the track).
+
+    ``window_title`` and ``hint`` replace the window's title and the note
+    under the fields, and ``allow_unchanged`` lets Save be pressed without
+    changing anything: the import windows use all three.
     """
     library_tracks = list(library_tracks)
     track_path = track.get("path")
@@ -1059,18 +1095,15 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
 
     show_edit_dialog(
         parent,
-        "Edit track",
+        window_title,
         specs,
         callback,
         cover_loader=load_cover if track_path else None,
-        hint=(
-            "The file is renamed and moved to match its title, artist "
-            "and album. Leave the album empty for a single: it is then "
-            "kept in the artist's folder."
-        ),
+        hint=hint,
         image_sources=image_sources,
         range_spec=range_spec,
         compilation_spec=compilation_spec,
+        allow_unchanged=allow_unchanged,
     )
 
 
@@ -1146,11 +1179,25 @@ def show_edit_artist_dialog(parent, artist, library_tracks, callback):
             "Picking an existing artist merges them into it."
         ),
         image_sources=lambda values: artist_sources(values["name"]),
+        round_cover=True,
     )
 
 
-def show_edit_playlist_dialog(parent, playlist, cover_path, callback):
-    """Edit a playlist's name. ``callback`` receives ``{"name": ...}``."""
+def show_edit_playlist_dialog(
+        parent,
+        playlist,
+        cover_path,
+        callback,
+        library_tracks=(),
+):
+    """Edit a playlist's name and picture.
+
+    ``callback`` receives ``{"name": ...}``, plus ``"image"`` (raw bytes) when
+    a new picture was chosen. ``library_tracks`` are the playlist's tracks:
+    the albums they come from are offered as suggestions for the picture.
+    """
+    library_tracks = list(library_tracks)
+
     specs = [
         {
             "key": "name",
@@ -1166,6 +1213,7 @@ def show_edit_playlist_dialog(parent, playlist, cover_path, callback):
         callback,
         cover_path=cover_path,
         placeholder_icon="view-list-symbolic",
+        image_sources=lambda values: playlist_sources(library_tracks),
     )
 
 
@@ -1296,6 +1344,19 @@ def set_track_navigation(
     )
 
 
+# "Delete" in a track's menu removes the track from the whole library, so,
+# like the navigation above, the window registers it once for every menu.
+_track_deletion = {"delete": None}
+
+
+def set_track_deletion(delete_track):
+    """Register what the track menus' "Delete" entry does.
+
+    ``delete_track(track)`` asks for confirmation and deletes it.
+    """
+    _track_deletion["delete"] = delete_track
+
+
 def attach_track_context_menu(
         row,
         track,
@@ -1317,6 +1378,13 @@ def attach_track_context_menu(
     gesture.set_button(3)
 
     def on_pressed(gesture, press_count, x, y):
+        # Right-clicking a track selects it at once. The list only selects a
+        # row when the click is released, which for a right click is after the
+        # menu has closed.
+        parent = row.get_parent()
+        if isinstance(parent, Gtk.ListBox):
+            parent.select_row(row)
+
         popover = Gtk.Popover()
         popover.set_parent(row)
         # Like a native context menu: no arrow, with the menu's top-left
@@ -1366,6 +1434,10 @@ def attach_track_context_menu(
         if on_remove_from_playlist is not None:
             menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
             add_item("Remove from playlist", on_remove_from_playlist)
+
+        if _track_deletion["delete"] is not None:
+            menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            add_item("Delete", _track_deletion["delete"])
 
         # (x, y) are relative to ``row``, which is what the popover is
         # parented to, so point at them directly.

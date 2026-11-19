@@ -93,6 +93,15 @@ class LibraryView(Gtk.Box):
         self._choose_playlist = choose_playlist
         self._refresh_list()
 
+    def set_import_callback(self, callback):
+        """Show an "Import" button in the header that calls ``callback()``.
+
+        Only the Library page gets one; without this call the button stays
+        hidden (the Compilations page is this same view).
+        """
+        self.import_button.connect("clicked", lambda _button: callback())
+        self.import_button.set_visible(True)
+
     def _build_header(self):
         header = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -108,6 +117,16 @@ class LibraryView(Gtk.Box):
 
         self.count_label = Gtk.Label(label=f"0 {self._noun}s")
         self.count_label.add_css_class("dim-label")
+
+        self.import_button = Gtk.Button()
+        self.import_button.set_child(
+            Adw.ButtonContent(
+                icon_name="list-add-symbolic",
+                label="Import",
+            )
+        )
+        self.import_button.set_tooltip_text("Import music into your library")
+        self.import_button.set_visible(False)
 
         self.sort_dropdown = Gtk.DropDown.new_from_strings([
             "Title",
@@ -131,6 +150,7 @@ class LibraryView(Gtk.Box):
 
         header.append(title)
         header.append(self.count_label)
+        header.append(self.import_button)
         header.append(self.sort_dropdown)
         header.append(self.search_entry)
         self.append(header)
@@ -203,7 +223,9 @@ class LibraryView(Gtk.Box):
         self.artwork_placeholder = Gtk.Image.new_from_icon_name(
             "audio-x-generic-symbolic"
         )
-        self.artwork_placeholder.set_pixel_size(96)
+        # The music note fills only part of the artwork's area, like the
+        # other pages' placeholders do (about 70% of the old size).
+        self.artwork_placeholder.set_pixel_size(67)
 
         self.artwork_stack.add_named(self.details_artwork, "artwork")
         self.artwork_stack.add_named(
@@ -347,7 +369,9 @@ class LibraryView(Gtk.Box):
         artwork = Gtk.Image.new_from_icon_name(
             "audio-x-generic-symbolic"
         )
-        artwork.set_pixel_size(self.THUMBNAIL_SIZE)
+        # The thumbnail keeps its size; only the music note inside it is
+        # smaller. A real cover (below) is drawn at the full size.
+        artwork.set_pixel_size(round(self.THUMBNAIL_SIZE * 0.7))
         artwork.set_size_request(
             self.THUMBNAIL_SIZE,
             self.THUMBNAIL_SIZE,
@@ -428,6 +452,19 @@ class LibraryView(Gtk.Box):
             if track.get("path") == selected_track.get("path"):
                 self.playback_manager.play_queue(queue, index)
                 return
+
+    def play_selected(self):
+        """Play the selected track, as a double click on it would.
+
+        False (and nothing played) when no track is selected.
+        """
+        row = self.track_list.get_selected_row()
+
+        if row is None or self.playback_manager is None:
+            return False
+
+        self._on_track_activated(self.track_list, row)
+        return True
 
     def _on_selection_changed(self, list_box, row):
         self._artwork_request_id += 1
@@ -550,6 +587,12 @@ class LibraryView(Gtk.Box):
         ]
 
     def _refresh_list(self):
+        # The selected track stays selected (and its details stay on screen)
+        # when the list is rebuilt: after an edit window is saved, a search,
+        # a new sort order...
+        selected = self._selected_track()
+        selected_id = selected.get("id") if selected is not None else None
+
         child = self.track_list.get_first_child()
 
         while child is not None:
@@ -561,8 +604,17 @@ class LibraryView(Gtk.Box):
             self._get_filtered_tracks()
         )
 
+        selected_row = None
+
         for track in visible_tracks:
-            self.track_list.append(self._create_track_row(track))
+            row = self._create_track_row(track)
+            self.track_list.append(row)
+
+            if selected_id is not None and track.get("id") == selected_id:
+                selected_row = row
+
+        if selected_row is not None:
+            self.track_list.select_row(selected_row)
 
         self._update_view()
 

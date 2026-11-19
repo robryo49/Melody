@@ -133,6 +133,9 @@ class SeekBar(Gtk.DrawingArea):
 
 
 class PlayerBar(Gtk.Box):
+    COVER_SIZE = 44
+    NOTE_SIZE = 31
+
     def __init__(self, playback_manager):
         super().__init__(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -142,6 +145,11 @@ class PlayerBar(Gtk.Box):
 
         self.playback_manager = playback_manager
         self._previous_volume = playback_manager.volume or 0.5
+
+        # Called by the play button when nothing is loaded in the player. It
+        # returns True if it started something (the selected track), False to
+        # let the button do what it normally does.
+        self.on_play_idle = None
 
         self.set_margin_start(18)
         self.set_margin_end(18)
@@ -159,7 +167,7 @@ class PlayerBar(Gtk.Box):
         )
         self.play_button = self._create_button(
             "media-playback-start-symbolic",
-            self.playback_manager.toggle_playback,
+            self._on_play_clicked,
         )
         self.next_button = self._create_button(
             "media-skip-forward-symbolic",
@@ -174,7 +182,9 @@ class PlayerBar(Gtk.Box):
         self.artwork = Gtk.Image.new_from_icon_name(
             "audio-x-generic-symbolic"
         )
-        self.artwork.set_pixel_size(44)
+        # The artwork's area stays 48 px; the music note shown while there is
+        # no cover is smaller than a cover (about 70%).
+        self.artwork.set_pixel_size(self.NOTE_SIZE)
         self.artwork.set_size_request(48, 48)
         self.append(self.artwork)
 
@@ -282,11 +292,22 @@ class PlayerBar(Gtk.Box):
         button.connect("clicked", lambda _button: callback())
         return button
 
+    def _on_play_clicked(self):
+        if (
+                self.playback_manager.current_track is None
+                and self.on_play_idle is not None
+                and self.on_play_idle()
+        ):
+            return
+
+        self.playback_manager.toggle_playback()
+
     def set_track(self, track):
         if track is None:
             self.title_label.set_text("Nothing playing")
             self.artist_label.set_text("")
             self.artwork.set_from_icon_name("audio-x-generic-symbolic")
+            self.artwork.set_pixel_size(self.NOTE_SIZE)
             self.progress.set_sensitive(False)
             self.progress.set_duration(0)
             self.progress.set_value(0)
@@ -305,8 +326,10 @@ class PlayerBar(Gtk.Box):
 
         if artwork_path and Path(artwork_path).is_file():
             self.artwork.set_from_file(artwork_path)
+            self.artwork.set_pixel_size(self.COVER_SIZE)
         else:
             self.artwork.set_from_icon_name("audio-x-generic-symbolic")
+            self.artwork.set_pixel_size(self.NOTE_SIZE)
 
         self.progress.set_sensitive(True)
         self._update_progress()

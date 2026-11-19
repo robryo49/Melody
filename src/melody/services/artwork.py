@@ -480,6 +480,26 @@ def _create_cached_image(
     image.save(cached_path, format="PNG")
 
 
+def write_cover_tile(artwork_data: bytes, path: Path, size: int = 512):
+    """Save ``artwork_data`` at ``path`` as a square PNG with rounded corners,
+    like every cover Melody shows. Replaces what was there (atomically)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = path.with_name(path.name + ".tmp")
+
+    try:
+        _create_cached_image(artwork_data, temporary_path, size)
+        temporary_path.replace(path)
+    except Exception:
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+
+        raise
+
+
 def _get_cached_artwork(
         path: Path,
         size: int,
@@ -562,37 +582,19 @@ def _find_local_artist_image(artist_folder: Path) -> Path | None:
     if not artist_folder.is_dir():
         return None
 
+    # Only names that say "this artist" count. An artist's folder also holds
+    # their singles, so a generic image there (cover.jpg, or any other
+    # picture) may well be the cover of a track, not a picture of the artist.
     extensions = (".jpg", ".jpeg", ".png", ".webp")
 
-    preferred_names = [
-                          f"artist{extension}" for extension in extensions
-                      ] + [
-                          f"folder{extension}" for extension in extensions
-                      ] + [
-                          f"image{extension}" for extension in extensions
-                      ] + [
-                          f"portrait{extension}" for extension in extensions
-                      ] + [
-                          f"cover{extension}" for extension in extensions
-                      ]
+    for stem in ("artist", "folder", "portrait"):
+        for extension in extensions:
+            candidate = artist_folder / f"{stem}{extension}"
 
-    for name in preferred_names:
-        candidate = artist_folder / name
+            if candidate.is_file():
+                return candidate
 
-        if candidate.is_file():
-            return candidate
-
-    try:
-        candidates = sorted(
-            candidate
-            for candidate in artist_folder.iterdir()
-            if candidate.is_file()
-            and candidate.suffix.casefold() in extensions
-        )
-    except OSError:
-        return None
-
-    return candidates[0] if candidates else None
+    return None
 
 
 def _search_deezer_artist(artist: str) -> bytes | None:

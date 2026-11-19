@@ -241,6 +241,26 @@ class Database:
 
         return dict(row) if row else None
 
+    def delete_track(self, track_id: str):
+        """Remove a track from the library. Its place in every playlist goes
+        with it (the playlists themselves stay)."""
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM tracks WHERE id = ?",
+                (track_id,),
+            )
+
+    def get_track_by_path(self, path: Path):
+        path = str(Path(path).expanduser().resolve())
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tracks WHERE path = ?",
+                (path,),
+            ).fetchone()
+
+        return dict(row) if row else None
+
     def get_track_count(self):
         with self._connect() as connection:
             return connection.execute(
@@ -345,6 +365,17 @@ class Database:
                 "DELETE FROM playlists WHERE id = ?",
                 (playlist_id,),
             )
+
+        # The picture chosen for the playlist, if any, goes with it.
+        try:
+            self.playlist_cover_path(playlist_id).unlink()
+        except OSError:
+            pass
+
+    def playlist_cover_path(self, playlist_id: str) -> Path:
+        """Where the picture chosen for a playlist is kept (the file only
+        exists once a picture has been chosen)."""
+        return self.path.parent / "playlist-covers" / f"{playlist_id}.png"
 
     def get_playlists(self):
         with self._connect() as connection:

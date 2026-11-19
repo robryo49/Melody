@@ -21,6 +21,8 @@ from melody.services.settings import get_settings
 from melody.services.singles import has_album
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
+from melody.widgets.cover_style import install_cover_css
+from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.value_label import value_label
 
 
@@ -44,6 +46,7 @@ class ArtistsView(Gtk.Box):
         self.on_rename_album_artist = None
         self.on_change_artist_image = None
         self.on_change_album_image = None
+        self.on_import = None
 
         self._build_header()
         self._build_grid()
@@ -81,6 +84,13 @@ class ArtistsView(Gtk.Box):
     def set_image_callbacks(self, artist_callback, album_callback):
         self.on_change_artist_image = artist_callback
         self.on_change_album_image = album_callback
+
+    def set_import_callback(self, callback):
+        """``callback(context)`` imports music from an artist's page or from
+        one of their albums' pages; the context names the artist (and the
+        album, on an album's page), the starting values of what is
+        imported."""
+        self.on_import = callback
 
     # ------------------------------------------------------------------
     # Navigation from a track's menu
@@ -208,6 +218,7 @@ class ArtistsView(Gtk.Box):
         self.grid = CollectionGrid(
             on_open=self._show_artist,
             placeholder_icon="avatar-default-symbolic",
+            round_covers=True,
         )
 
         self.empty_page = Adw.StatusPage(
@@ -291,6 +302,13 @@ class ArtistsView(Gtk.Box):
         )
         self.artist_artwork_stack.set_visible_child_name("placeholder")
 
+        # An artist's picture is round, and so is the disc behind the default
+        # icon when they have none.
+        install_cover_css()
+        self.artist_artwork_stack.set_overflow(Gtk.Overflow.HIDDEN)
+        self.artist_artwork_stack.add_css_class("round-cover")
+        self.artist_placeholder.add_css_class("cover-placeholder")
+
         artist_labels = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=8,
@@ -326,6 +344,9 @@ class ArtistsView(Gtk.Box):
         artist_actions.set_halign(Gtk.Align.START)
         artist_actions.append(self.artist_play_button)
         artist_actions.append(artist_edit_button)
+        artist_actions.append(
+            create_import_button(self._on_import_to_artist_clicked)
+        )
 
         artist_labels.append(self.artist_name)
         artist_labels.append(self.artist_album_count)
@@ -336,6 +357,8 @@ class ArtistsView(Gtk.Box):
             with_edit_button(
                 self.artist_artwork_stack,
                 self._on_change_artist_image_clicked,
+                # Further in than usual, so it stays on the round picture.
+                margin=20,
             )
         )
         self.artist_info.append(artist_labels)
@@ -518,6 +541,9 @@ class ArtistsView(Gtk.Box):
         album_actions.set_halign(Gtk.Align.START)
         album_actions.append(self.album_play_button)
         album_actions.append(album_edit_button)
+        album_actions.append(
+            create_import_button(self._on_import_to_album_clicked)
+        )
 
         labels.append(self.album_title)
         labels.append(self.album_artist)
@@ -566,46 +592,95 @@ class ArtistsView(Gtk.Box):
         track_scroll.set_child(self.album_track_list)
         self.album_page.append(track_scroll)
 
-    def set_tracks(self, tracks):
-        selected_album_track_id = None
-        selected_artist_track_id = None
-        selected_artist_name = (
-            self.current_artist["name"].casefold()
-            if (
-                self.current_artist is not None
-                and self.stack.get_visible_child_name() == "artist"
+    @staticmethod
+    def _artist_track_ids(artist):
+        """The id of every track on ``artist``'s page."""
+        return {
+            track.get("id")
+            for track in (
+                *(
+                    track
+                    for album in artist["albums"]
+                    for track in album["tracks"]
+                ),
+                *artist["compilations"],
+                *artist["singles"],
             )
-            else None
-        )
-        if self.current_album and self.current_album.get("tracks"):
-            selected_album_track_id = self.current_album["tracks"][0].get("id")
-        elif self.current_artist:
-            for album in self.current_artist.get("albums", []):
-                if album.get("tracks"):
-                    selected_artist_track_id = album["tracks"][0].get("id")
-                    break
+        }
+
+    def _find_album_by_tracks(self, track_ids):
+        """``(artist, album)`` now holding most of ``track_ids`` (or None).
+
+        An album that was renamed, merged, or given another album artist took
+        all its tracks along, and an album that lost one track to an edit
+        still holds the others, so either way it is the one found.
+        """
+        best, best_count = None, 0
+
+        for artist in self.artists:
+            for album in artist["albums"]:
+                count = len(
+                    track_ids & {track.get("id") for track in album["tracks"]}
+                )
+
+                if count > best_count:
+                    best, best_count = (artist, album), count
+
+        return best
+
+    def _find_artist_by_tracks(self, track_ids):
+        """The artist now holding most of ``track_ids`` (or None)."""
+        best, best_count = None, 0
+
+        for artist in self.artists:
+            count = len(track_ids & self._artist_track_ids(artist))
+
+            if count > best_count:
+                best, best_count = artist, count
+
+        return best
+
+    def set_tracks(self, tracks):
+        # Whatever page is showing before the refresh (an edit window was
+        # just saved, the library was rescanned...) is showing again after
+        # it: the grid stays the grid, an artist's page stays that artist's
+        # page, an album's page stays that album's page. Artists and albums
+        # are found again by the tracks they held rather than by their name,
+        # because the edit may well have renamed them.
+        page = self.stack.get_visible_child_name()
+        album_ids = None
+        artist_ids = None
+
+        if page == "album" and self.current_album is not None:
+            album_ids = {
+                track.get("id") for track in self.current_album["tracks"]
+            }
+
+        if page in ("artist", "album") and self.current_artist is not None:
+            artist_ids = self._artist_track_ids(self.current_artist)
+
         self.tracks = list(tracks)
         self.current_artist = None
         self.current_album = None
         self._build_artists()
         self._refresh_grid()
-        target_id = selected_album_track_id or selected_artist_track_id
-        if target_id is not None:
-            for artist in self.artists:
-                for album in artist["albums"]:
-                    if any(track.get("id") == target_id for track in album["tracks"]):
-                        self._show_artist(artist)
-                        if selected_album_track_id is not None:
-                            self._show_album(album)
-                        return
 
-        # An artist with no album (only singles and/or compilations): stay
-        # on their page, found by name.
-        if selected_artist_name is not None:
-            for artist in self.artists:
-                if artist["name"].casefold() == selected_artist_name:
-                    self._show_artist(artist)
-                    return
+        if album_ids:
+            found = self._find_album_by_tracks(album_ids)
+
+            if found is not None:
+                artist, album = found
+                self._show_artist(artist)
+                self._show_album(album)
+                return
+
+        # On an artist's page, or the album is gone: the artist's page is the
+        # closest thing left to where the person was.
+        if artist_ids:
+            artist = self._find_artist_by_tracks(artist_ids)
+
+            if artist is not None:
+                self._show_artist(artist)
 
     def _build_artists(self):
         artists = {}
@@ -696,8 +771,9 @@ class ArtistsView(Gtk.Box):
             all_tracks = [
                 track for album in albums for track in album["tracks"]
             ] + artist["compilations"] + artist["singles"]
-            # The artist's own picture (an image in their folder) if they
-            # have one, otherwise the cover of their first album.
+            # The artist's own picture (an image in their folder), and only
+            # that. With none, the artist shows the default icon: never the
+            # cover of one of their albums or tracks.
             artist["artwork_path"] = next(
                 (
                     track["artist_artwork_path"]
@@ -705,19 +781,6 @@ class ArtistsView(Gtk.Box):
                     if track.get("artist_artwork_path")
                 ),
                 None,
-            ) or (
-                albums[0]["artwork_path"] if albums
-                else next(
-                    (
-                        track["album_artwork_path"]
-                        for track in (
-                            *artist["compilations"],
-                            *artist["singles"],
-                        )
-                        if track.get("album_artwork_path")
-                    ),
-                    None,
-                )
             )
 
             self.artists.append(artist)
@@ -1200,7 +1263,9 @@ class ArtistsView(Gtk.Box):
             artwork = Gtk.Image.new_from_icon_name(
                 "audio-x-generic-symbolic"
             )
-            artwork.set_pixel_size(self.COMPILATION_THUMBNAIL_SIZE)
+            # Only the music note is smaller; a real cover (below) is drawn
+            # at the full thumbnail size.
+            artwork.set_pixel_size(round(self.COMPILATION_THUMBNAIL_SIZE * 0.7))
             artwork.set_size_request(
                 self.COMPILATION_THUMBNAIL_SIZE,
                 self.COMPILATION_THUMBNAIL_SIZE,
@@ -1278,6 +1343,19 @@ class ArtistsView(Gtk.Box):
         if self.current_artist is not None and self.on_rename_artist is not None:
             self.on_rename_artist(self.current_artist)
 
+    def _on_import_to_artist_clicked(self):
+        # On an artist's page only the artist is a starting value: the album
+        # is left to what the file says.
+        if self.current_artist is not None and self.on_import is not None:
+            self.on_import({"artist": self.current_artist["name"]})
+
+    def _on_import_to_album_clicked(self):
+        if self.current_album is not None and self.on_import is not None:
+            self.on_import({
+                "artist": self.current_album["artist"],
+                "album": self.current_album["title"],
+            })
+
     def _on_edit_artist_album_clicked(self):
         if self.current_album is not None and self.on_rename_album is not None:
             self.on_rename_album(self.current_album)
@@ -1316,7 +1394,12 @@ class ArtistsView(Gtk.Box):
         self._refresh_grid()
 
     def _on_artist_back_clicked(self, button):
+        # Nothing is open any more: a refresh must not bring it back.
+        self.current_artist = None
+        self.current_album = None
         self.stack.set_visible_child_name("grid")
 
     def _on_album_back_clicked(self, button):
+        # Back on the artist's page, no album is open any more.
+        self.current_album = None
         self.stack.set_visible_child_name("artist")

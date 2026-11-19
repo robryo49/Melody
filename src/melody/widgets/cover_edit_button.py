@@ -7,12 +7,15 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk
 
 
-def with_edit_button(cover, on_edit, tooltip="Change image"):
+def with_edit_button(cover, on_edit, tooltip="Change image", margin=8):
     """Wrap ``cover`` in an overlay carrying a round edit button.
 
     The button is only visible while the cover is hovered, the same way the
     play button is in the grid views. ``on_edit()`` is called when it is
     clicked. The overlay is laid out exactly like ``cover`` was.
+
+    ``margin`` is how far the button sits from the corner. A round cover
+    needs more, so that the button stays on the picture.
     """
     overlay = Gtk.Overlay()
     overlay.set_valign(cover.get_valign())
@@ -24,8 +27,8 @@ def with_edit_button(cover, on_edit, tooltip="Change image"):
     button.add_css_class("osd")
     button.set_halign(Gtk.Align.END)
     button.set_valign(Gtk.Align.END)
-    button.set_margin_end(8)
-    button.set_margin_bottom(8)
+    button.set_margin_end(margin)
+    button.set_margin_bottom(margin)
     button.set_tooltip_text(tooltip)
     button.set_visible(False)
     button.connect("clicked", lambda _button: on_edit())

@@ -158,3 +158,36 @@ def library_album_source(
         load,
         f"“{title}”" if title else "",
     )
+
+
+def playlist_sources(tracks: list[dict], limit: int = 4) -> list[ImageSource]:
+    """The covers of the albums a playlist's tracks come from.
+
+    ``tracks`` are the playlist's tracks (as the library has them). Each
+    album counts once, in the order its first track appears, up to
+    ``limit``. A single has no album, so it has no cover to offer.
+    """
+    sources = []
+    seen = set()
+
+    for track in tracks:
+        album = str(track.get("album") or "").strip()
+
+        if not album:
+            continue
+
+        artist = str(
+            track.get("album_artist") or track.get("artist") or ""
+        ).strip()
+        key = (artist.casefold(), album.casefold())
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        sources.append(library_album_source(tracks, artist, album))
+
+        if len(sources) == limit:
+            break
+
+    return sources
