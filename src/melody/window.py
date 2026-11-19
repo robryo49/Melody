@@ -423,6 +423,30 @@ class MelodyWindow(Adw.ApplicationWindow):
             )
             result = {"moved": 0, "errors": [], "merged": False}
 
+            # Where the track starts / stops playing. Stored by track id, so
+            # it follows the track when the edit below renames or moves it.
+            if "start_time" in values and (
+                    values["start_time"] != track.get("start_time")
+                    or values["end_time"] != track.get("end_time")
+            ):
+                try:
+                    self.database.set_track_range(
+                        track["id"],
+                        values["start_time"],
+                        values["end_time"],
+                    )
+                except Exception as error:
+                    show_error_dialog(
+                        self, "Could not save the start and end times", error,
+                    )
+                    return
+
+                self.playback_manager.update_track_range(
+                    track["id"],
+                    values["start_time"],
+                    values["end_time"],
+                )
+
             if changed:
                 try:
                     result = self.library_editor.edit_track(

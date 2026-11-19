@@ -11,12 +11,14 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from melody.services.artwork import get_cached_own_artwork
+from melody.services.track_range import track_length
 from melody.services.image_sources import (
     album_sources,
     artist_sources,
     library_album_source,
 )
 from melody.widgets.image_picker import show_image_picker, texture_from_bytes
+from melody.widgets.range_selector import TimeRangeSelector
 
 
 SORT_OPTIONS = ["Title", "Album", "Artist", "Duration"]
@@ -27,7 +29,7 @@ def sort_tracks(tracks, selected_index):
         0: lambda track: str(track.get("title") or "").casefold(),
         1: lambda track: str(track.get("album") or "").casefold(),
         2: lambda track: str(track.get("artist") or "").casefold(),
-        3: lambda track: float(track.get("duration") or 0),
+        3: lambda track: track_length(track),
     }
     return sorted(tracks, key=keys.get(selected_index, keys[0]))
 
@@ -552,6 +554,7 @@ def show_edit_dialog(
         hint=None,
         image_sources=None,
         apply_artwork=False,
+        range_spec=None,
 ):
     """Open a window with a cover on the left and editable fields on the right.
 
@@ -574,6 +577,11 @@ def show_edit_dialog(
 
     With ``apply_artwork`` an "Apply artwork" toggle sits under the cover.
     When it is on at Save time, ``values["apply_to_tracks"]`` is ``True``.
+
+    With ``range_spec`` (``{"duration": seconds, "start": seconds or None,
+    "end": seconds or None}``) a start / end selector sits at the bottom of
+    the window. ``values["start_time"]`` and ``values["end_time"]`` are then
+    given to ``callback`` (``None`` meaning the very start / end of the track).
     """
     keys = tuple(spec["key"] for spec in specs)
     original = {
@@ -785,15 +793,33 @@ def show_edit_dialog(
 
     # -- save logic ------------------------------------------------------
 
+    # The start / end selector (only for windows given a ``range_spec``).
+    selector = None
+    original_range = None
+    if range_spec:
+        selector = TimeRangeSelector(
+            range_spec["duration"],
+            range_spec.get("start"),
+            range_spec.get("end"),
+        )
+        original_range = selector.stored_range()
+
     def current_values():
         return {key: field.get_text() for key, field in fields.items()}
 
+    def range_changed():
+        return selector is not None and selector.stored_range() != original_range
+
     def can_save():
+        if selector is not None and not selector.is_valid():
+            return False
+
         values = current_values()
         return all(values.values()) and (
             values != original
             or pending["data"] is not None
             or apply_state["on"]
+            or range_changed()
         )
 
     def on_changed(*_args):
@@ -807,12 +833,17 @@ def show_edit_dialog(
             values["image"] = pending["data"]
         if apply_state["on"]:
             values["apply_to_tracks"] = True
+        if selector is not None:
+            values["start_time"], values["end_time"] = selector.stored_range()
         window.close()
         callback(values)
 
     for field in fields.values():
         field.connect_changed(on_changed)
         field.connect_activate(on_save)
+
+    if selector is not None:
+        selector.connect_changed(on_changed)
 
     def on_image_selected(data):
         # 256px, like the covers loaded from the library: a picture's natural
@@ -849,7 +880,20 @@ def show_edit_dialog(
     save_button.connect("clicked", on_save)
     _close_on_escape(window)
 
-    toolbar.set_content(content)
+    body = content
+    if selector is not None:
+        # The start / end selector sits at the very bottom of the window,
+        # under both columns, with the same margins as the rest.
+        content.set_margin_bottom(16)
+        selector.set_margin_start(GAP)
+        selector.set_margin_end(GAP)
+        selector.set_margin_bottom(GAP)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        body.append(content)
+        body.append(selector)
+
+    toolbar.set_content(body)
     window.set_content(toolbar)
     window.present()
     fields[keys[0]].grab_focus(show_suggestions=False)
@@ -860,7 +904,9 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
 
     The artist and album fields list what already exists in
     ``library_tracks``. ``callback`` receives
-    ``{"title": ..., "artist": ..., "album": ...}``.
+    ``{"title": ..., "artist": ..., "album": ..., "start_time": ...,
+    "end_time": ...}`` (the last two are ``None`` for the very start / end of
+    the track).
     """
     library_tracks = list(library_tracks)
     track_path = track.get("path")
@@ -910,6 +956,18 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
         sources.extend(album_sources(album_artist, values["album"]))
         return sources
 
+    # Where the track starts and stops playing (only when its length is
+    # known).
+    duration = float(track.get("duration") or 0)
+    range_spec = (
+        {
+            "duration": duration,
+            "start": track.get("start_time"),
+            "end": track.get("end_time"),
+        }
+        if duration > 0 else None
+    )
+
     show_edit_dialog(
         parent,
         "Edit track",
@@ -921,6 +979,7 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
             "and album."
         ),
         image_sources=image_sources,
+        range_spec=range_spec,
     )
 
 

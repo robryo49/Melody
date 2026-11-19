@@ -3,6 +3,8 @@ import random
 
 import gi
 
+from melody.services.track_range import track_range
+
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
@@ -26,6 +28,9 @@ class PlaybackManager:
         self.current_track = None
         self.state = "stopped"
         self.volume = 0.5
+
+        # Where to seek to once the pipeline is ready (see _load_current_track).
+        self._pending_seek = None
 
         self.repeat_mode = "off"
         self.shuffle = False
@@ -130,7 +135,41 @@ class PlaybackManager:
             self.on_track_changed(track)
 
         self._set_state("playing")
-        self.player.set_state(Gst.State.PLAYING)
+
+        start, end = self._track_range(track)
+
+        if start > 0 or end is not None:
+            # A track with a custom start and/or end: it can only be seeked
+            # once the pipeline is ready, so go to PAUSED first. The seek (and
+            # then playing) happens in the bus handler, on ASYNC_DONE.
+            self._pending_seek = start
+            self.player.set_state(Gst.State.PAUSED)
+        else:
+            self._pending_seek = None
+            self.player.set_state(Gst.State.PLAYING)
+
+    @staticmethod
+    def _track_range(track):
+        return track_range(track)
+
+    def update_track_range(self, track_id, start, end):
+        """A track's start / end was edited: apply it to the queue and, if it
+        is the track being played, to the playback right away."""
+        for track in (*self.queue, self.current_track):
+            if track is not None and track.get("id") == track_id:
+                track["start_time"] = start
+                track["end_time"] = end
+
+        current = self.current_track
+
+        if (
+                current is not None
+                and current.get("id") == track_id
+                and self._pending_seek is None
+        ):
+            # Seek to where it is now: that clamps it into the new range and
+            # sets the new stop position.
+            self.seek(self.get_position())
 
     def play(self):
         if self.current_track is None:
@@ -157,6 +196,7 @@ class PlaybackManager:
             self.play()
 
     def stop(self):
+        self._pending_seek = None
         self.player.set_state(Gst.State.NULL)
         self.current_track = None
         self.current_index = -1
@@ -211,10 +251,11 @@ class PlaybackManager:
             self.stop()
 
     def previous(self):
-        position = self.get_position()
+        start, _end = self._track_range(self.current_track)
+        position = self.get_position() - start
 
         if position > 3:
-            self.seek(0)
+            self.seek(start)
             return
 
         if self.shuffle:
@@ -243,13 +284,36 @@ class PlaybackManager:
         if self.current_track is None:
             return False
 
-        position = max(0.0, float(position))
+        # Not ready yet: just change where it will start.
+        if self._pending_seek is not None:
+            self._pending_seek = max(0.0, float(position))
+            return True
 
-        return self.player.seek_simple(
+        return self._seek_range(position)
+
+    def _seek_range(self, position):
+        """Seek to ``position``, kept inside the track's start / end.
+
+        The seek also sets the stop position: when playback reaches the track's
+        end, GStreamer posts EOS, exactly as if the file had ended, so the
+        usual next track / repeat handling takes over.
+        """
+        start, end = self._track_range(self.current_track)
+
+        position = max(start, float(position))
+
+        if end is not None:
+            position = min(position, max(start, end - 0.05))
+
+        return self.player.seek(
+            1.0,
             Gst.Format.TIME,
             Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
+            Gst.SeekType.SET,
             int(position * Gst.SECOND),
-            )
+            Gst.SeekType.SET,
+            int(end * Gst.SECOND) if end is not None else -1,
+        )
 
     def set_volume(self, volume):
         self.volume = max(0.0, min(1.0, float(volume)))
@@ -262,6 +326,31 @@ class PlaybackManager:
     def get_duration(self):
         success, duration = self.player.query_duration(Gst.Format.TIME)
         return duration / Gst.SECOND if success else 0.0
+
+    # Position and length *within the track's start / end*: what the player
+    # bar shows. 0 is the track's start time, the duration is end - start.
+
+    def get_clip_position(self):
+        start, _end = self._track_range(self.current_track)
+        return max(0.0, self.get_position() - start)
+
+    def get_clip_duration(self):
+        track = self.current_track
+        start, end = self._track_range(track)
+
+        if end is not None:
+            stop = end
+        else:
+            stop = self.get_duration() or float(
+                (track or {}).get("duration") or 0
+            )
+
+        return max(0.0, stop - start)
+
+    def seek_clip(self, position):
+        """Seek to ``position`` seconds after the track's start time."""
+        start, _end = self._track_range(self.current_track)
+        return self.seek(start + float(position))
 
     def _set_state(self, state):
         if self.state == state:
@@ -289,13 +378,23 @@ class PlaybackManager:
             error, debug = message.parse_error()
             self._report_error(str(error))
 
+        elif message.type == Gst.MessageType.ASYNC_DONE:
+            # The pipeline is ready: jump to the track's start (and set its
+            # end), then play.
+            if message.src == self.player and self._pending_seek is not None:
+                position = self._pending_seek
+                self._pending_seek = None
+                self._seek_range(position)
+                self.player.set_state(Gst.State.PLAYING)
+                self._set_state("playing")
+
         elif message.type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.player:
                 old_state, new_state, pending_state = message.parse_state_changed()
 
                 if new_state == Gst.State.PLAYING:
                     self._set_state("playing")
-                elif new_state == Gst.State.PAUSED:
+                elif new_state == Gst.State.PAUSED and self._pending_seek is None:
                     self._set_state("paused")
 
     def close(self):

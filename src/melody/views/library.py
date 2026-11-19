@@ -10,6 +10,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk, Pango
 
 from melody.services.artwork import get_cached_full_artwork
+from melody.services.track_range import track_length
 from melody.layout import PAGE_MARGIN, SEARCH_WIDTH, style_header_controls
 from melody.services.collection_actions import (
     attach_track_context_menu,
@@ -365,7 +366,7 @@ class LibraryView(Gtk.Box):
         artist.add_css_class("caption")
 
         duration = Gtk.Label(
-            label=self._format_duration(track.get("duration")),
+            label=self._format_duration(track_length(track)),
             xalign=1,
         )
         duration.set_size_request(52, -1)
@@ -430,7 +431,7 @@ class LibraryView(Gtk.Box):
             str(track.get("album") or "Unknown Album")
         )
         self.details_duration.set_text(
-            self._format_duration(track.get("duration"))
+            self._format_duration(track_length(track))
         )
         self.details_path.set_text(track_path)
         self._update_action_buttons()
@@ -507,7 +508,7 @@ class LibraryView(Gtk.Box):
         if field == "duration":
             return sorted(
                 tracks,
-                key=lambda track: float(track.get("duration") or 0),
+                key=lambda track: track_length(track),
             )
 
         return sorted(

@@ -12,6 +12,7 @@ from melody.services.collection_actions import (
     toggle_track_playback,
     track_is_playing,
 )
+from melody.services.track_range import track_length
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.value_label import value_label
 
@@ -387,7 +388,7 @@ class PlaylistsView(Gtk.Box):
         title.set_hexpand(True)
 
         duration = Gtk.Label(
-            label=self._format_duration(track.get("duration")),
+            label=self._format_duration(track_length(track)),
             xalign=1,
         )
         duration.add_css_class("dim-label")

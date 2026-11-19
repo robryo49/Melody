@@ -55,6 +55,10 @@ class Database:
             for name, definition in {
                 "file_size": "INTEGER",
                 "file_mtime": "REAL",
+                # Where the track starts / stops playing, in seconds. NULL
+                # means the very start / the very end of the file.
+                "start_time": "REAL",
+                "end_time": "REAL",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -239,6 +243,26 @@ class Database:
             return connection.execute(
                 "SELECT COUNT(*) FROM tracks"
             ).fetchone()[0]
+
+    def set_track_range(
+            self,
+            track_id: str,
+            start_time: float | None,
+            end_time: float | None,
+    ):
+        """Remember where a track starts and stops playing.
+
+        ``None`` for either means the very start / end of the file. Library
+        scans and edits never touch these two columns, so they survive both.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tracks SET start_time = ?, end_time = ? WHERE id = ?",
+                (start_time, end_time, track_id),
+            )
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"Track does not exist: {track_id}")
 
     def update_track(self, track_id: str, path: Path, metadata):
         path = str(Path(path).expanduser().resolve())

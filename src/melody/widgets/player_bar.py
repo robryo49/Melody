@@ -76,7 +76,7 @@ class SeekBar(Gtk.DrawingArea):
 
         self.position = self._position_from_x(x)
         self.dragging = False
-        self.playback_manager.seek(self.position)
+        self.playback_manager.seek_clip(self.position)
         self.queue_draw()
 
     def _draw(self, area, cr, width, height):
@@ -393,8 +393,8 @@ class PlayerBar(Gtk.Box):
         self.volume_button.set_child(Gtk.Image.new_from_icon_name(icon))
 
     def _update_progress(self):
-        duration = self.playback_manager.get_duration()
-        position = self.playback_manager.get_position()
+        duration = self.playback_manager.get_clip_duration()
+        position = self.playback_manager.get_clip_position()
 
         self.progress.set_duration(duration)
         self.progress.set_value(position)

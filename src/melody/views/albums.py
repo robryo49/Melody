@@ -13,6 +13,7 @@ from melody.services.collection_actions import (
     track_is_playing,
 )
 from melody.layout import style_header_controls
+from melody.services.track_range import track_length
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.value_label import value_label
@@ -435,7 +436,7 @@ class AlbumsView(Gtk.Box):
         title.set_hexpand(True)
 
         duration = Gtk.Label(
-            label=self._format_duration(track.get("duration")),
+            label=self._format_duration(track_length(track)),
             xalign=1,
         )
         duration.add_css_class("dim-label")
