@@ -11,6 +11,13 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from melody.services.artwork import get_cached_own_artwork
+from melody.services.compilations import (
+    automatic_is_compilation,
+    format_clock,
+    is_compilation,
+)
+from melody.services.settings import get_settings
+from melody.services.singles import has_album
 from melody.services.track_range import track_length
 from melody.services.image_sources import (
     album_sources,
@@ -555,6 +562,7 @@ def show_edit_dialog(
         image_sources=None,
         apply_artwork=False,
         range_spec=None,
+        compilation_spec=None,
 ):
     """Open a window with a cover on the left and editable fields on the right.
 
@@ -563,7 +571,8 @@ def show_edit_dialog(
         {"key": "artist", "label": "Artist", "initial": "...",
          "noun": "artist",            # optional: enables the suggestion list
          "suggestions": [...],        # optional
-         "priority_field": "artist"}  # optional: rank by another field
+         "priority_field": "artist",  # optional: rank by another field
+         "optional": True}            # optional: may be left empty
 
     ``callback`` receives ``{key: text}`` and is only called when something
     actually changed. The cover is ``cover_path`` if it exists, otherwise
@@ -582,8 +591,18 @@ def show_edit_dialog(
     "end": seconds or None}``) a start / end selector sits at the bottom of
     the window. ``values["start_time"]`` and ``values["end_time"]`` are then
     given to ``callback`` (``None`` meaning the very start / end of the track).
+
+    With ``compilation_spec`` (``{"initial": bool, "automatic": bool,
+    "kind": the track's current kind, "tooltip": text}``) a "Compilation"
+    checkbox is added. ``values["kind"]`` is then given to ``callback``:
+    ``None`` (decided by length), ``"track"`` or ``"compilation"``.
     """
     keys = tuple(spec["key"] for spec in specs)
+    # A field marked "optional" may be left empty (a track's album, for a
+    # single).
+    required_keys = tuple(
+        spec["key"] for spec in specs if not spec.get("optional")
+    )
     original = {
         spec["key"]: str(spec.get("initial") or "").strip()
         for spec in specs
@@ -619,7 +638,7 @@ def show_edit_dialog(
         cover_size,
         len(specs) * 86 - 16
         + (204 if any(spec.get("noun") for spec in specs) else 0)
-        + (44 if hint else 0),
+        + (60 if hint else 0),
     )
 
     cover = Gtk.Picture()
@@ -804,6 +823,36 @@ def show_edit_dialog(
         )
         original_range = selector.stored_range()
 
+    # The "Compilation" checkbox (only for windows given a
+    # ``compilation_spec``).
+    compilation_check = None
+    compilation_initial = False
+    if compilation_spec:
+        compilation_initial = bool(compilation_spec["initial"])
+        compilation_check = Gtk.CheckButton(label="Compilation")
+        compilation_check.set_active(compilation_initial)
+        compilation_check.set_halign(Gtk.Align.START)
+        compilation_check.set_tooltip_text(compilation_spec.get("tooltip"))
+
+    def compilation_changed():
+        return (
+            compilation_check is not None
+            and compilation_check.get_active() != compilation_initial
+        )
+
+    def compilation_kind():
+        """What to store: nothing special when the checkbox matches what the
+        track's length says, otherwise the forced kind."""
+        active = compilation_check.get_active()
+
+        if active == compilation_initial:
+            return compilation_spec.get("kind")
+
+        if active == compilation_spec["automatic"]:
+            return None
+
+        return "compilation" if active else "track"
+
     def current_values():
         return {key: field.get_text() for key, field in fields.items()}
 
@@ -815,11 +864,12 @@ def show_edit_dialog(
             return False
 
         values = current_values()
-        return all(values.values()) and (
+        return all(values[key] for key in required_keys) and (
             values != original
             or pending["data"] is not None
             or apply_state["on"]
             or range_changed()
+            or compilation_changed()
         )
 
     def on_changed(*_args):
@@ -835,6 +885,8 @@ def show_edit_dialog(
             values["apply_to_tracks"] = True
         if selector is not None:
             values["start_time"], values["end_time"] = selector.stored_range()
+        if compilation_check is not None:
+            values["kind"] = compilation_kind()
         window.close()
         callback(values)
 
@@ -844,6 +896,9 @@ def show_edit_dialog(
 
     if selector is not None:
         selector.connect_changed(on_changed)
+
+    if compilation_check is not None:
+        compilation_check.connect("toggled", on_changed)
 
     def on_image_selected(data):
         # 256px, like the covers loaded from the library: a picture's natural
@@ -880,18 +935,29 @@ def show_edit_dialog(
     save_button.connect("clicked", on_save)
     _close_on_escape(window)
 
-    body = content
-    if selector is not None:
-        # The start / end selector sits at the very bottom of the window,
-        # under both columns, with the same margins as the rest.
-        content.set_margin_bottom(16)
-        selector.set_margin_start(GAP)
-        selector.set_margin_end(GAP)
-        selector.set_margin_bottom(GAP)
+    # Under both columns, from top to bottom: the "Compilation" checkbox,
+    # then the start / end selector at the very bottom of the window.
+    extras = []
 
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    if compilation_check is not None:
+        extras.append(compilation_check)
+
+    if selector is not None:
+        extras.append(selector)
+
+    body = content
+    if extras:
+        content.set_margin_bottom(16)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         body.append(content)
-        body.append(selector)
+
+        for extra in extras:
+            extra.set_margin_start(GAP)
+            extra.set_margin_end(GAP)
+            body.append(extra)
+
+        extras[-1].set_margin_bottom(GAP)
 
     toolbar.set_content(body)
     window.set_content(toolbar)
@@ -937,22 +1003,29 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
             "suggestions": _album_suggestions(library_tracks),
             # Albums by the artist typed above come first.
             "priority_field": "artist",
+            # Left empty, the track is a single.
+            "optional": True,
         },
     ]
 
     def image_sources(values):
         # The album in the window, not the one the track is in right now: it
-        # may have been changed above without being saved yet. The track's
-        # album artist is left alone by the edit, so it stays the same.
-        album_artist = track.get("album_artist") or values["artist"]
+        # may have been changed above without being saved yet. The album
+        # artist always matches the artist typed in the window.
+        album_artist = values["artist"]
 
-        sources = [
-            library_album_source(
-                library_tracks,
-                album_artist,
-                values["album"],
+        sources = []
+
+        # A single has no album, so there is no album image to borrow.
+        if values["album"]:
+            sources.append(
+                library_album_source(
+                    library_tracks,
+                    album_artist,
+                    values["album"],
+                )
             )
-        ]
+
         sources.extend(album_sources(album_artist, values["album"]))
         return sources
 
@@ -968,6 +1041,22 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
         if duration > 0 else None
     )
 
+    # Single track or compilation (only when compilations are enabled).
+    settings = get_settings()
+    compilation_spec = None
+    if settings.compilations_enabled:
+        compilation_spec = {
+            "initial": is_compilation(track),
+            "automatic": automatic_is_compilation(track),
+            "kind": track.get("kind"),
+            "tooltip": (
+                "A long audio file such as a mix or a live set. By "
+                "default, audio longer than "
+                f"{format_clock(settings.compilation_threshold)} is a "
+                "compilation."
+            ),
+        }
+
     show_edit_dialog(
         parent,
         "Edit track",
@@ -976,10 +1065,12 @@ def show_edit_track_dialog(parent, track, callback, library_tracks=()):
         cover_loader=load_cover if track_path else None,
         hint=(
             "The file is renamed and moved to match its title, artist "
-            "and album."
+            "and album. Leave the album empty for a single: it is then "
+            "kept in the artist's folder."
         ),
         image_sources=image_sources,
         range_spec=range_spec,
+        compilation_spec=compilation_spec,
     )
 
 
@@ -1260,7 +1351,11 @@ def attach_track_context_menu(
         add_item("Pause" if is_playing(track) else "Play", on_play_pause)
 
         navigation = _track_navigation
-        if navigation["open_album"] is not None and not navigation["album_is_open"](track):
+        if (
+            navigation["open_album"] is not None
+            and has_album(track)
+            and not navigation["album_is_open"](track)
+        ):
             add_item("Open album", navigation["open_album"])
         if navigation["open_artist"] is not None and not navigation["artist_is_open"](track):
             add_item("Open artist", navigation["open_artist"])

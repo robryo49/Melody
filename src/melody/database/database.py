@@ -59,6 +59,9 @@ class Database:
                 # means the very start / the very end of the file.
                 "start_time": "REAL",
                 "end_time": "REAL",
+                # NULL: single track or compilation by length (see
+                # services/compilations.py). 'track' / 'compilation' forces it.
+                "kind": "TEXT",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -259,6 +262,21 @@ class Database:
             cursor = connection.execute(
                 "UPDATE tracks SET start_time = ?, end_time = ? WHERE id = ?",
                 (start_time, end_time, track_id),
+            )
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"Track does not exist: {track_id}")
+
+    def set_track_kind(self, track_id: str, kind: str | None):
+        """Force a track to be a 'track' or a 'compilation' (``None`` goes
+        back to deciding by its length)."""
+        if kind not in (None, "track", "compilation"):
+            raise ValueError(f"Invalid track kind: {kind}")
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tracks SET kind = ? WHERE id = ?",
+                (kind, track_id),
             )
 
             if cursor.rowcount == 0:

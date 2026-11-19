@@ -60,10 +60,16 @@ def _sanitize_name(value: str) -> str:
 
 def get_destination(root: Path, path: Path, metadata: TrackMetadata) -> Path:
     artist = _sanitize_name(metadata.album_artist)
-    album = _sanitize_name(metadata.album)
     title = _sanitize_name(metadata.title)
 
     filename = f"{title}{path.suffix}"
+
+    # A single (no album) lives directly in its artist's folder: no album,
+    # no album folder.
+    if not metadata.album.strip():
+        return root / artist / filename
+
+    album = _sanitize_name(metadata.album)
 
     return root / artist / album / filename
 

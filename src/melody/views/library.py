@@ -27,8 +27,27 @@ class LibraryView(Gtk.Box):
     PANEL_WIDTH = ARTWORK_SIZE + 2 * PANEL_PADDING
     THUMBNAIL_SIZE = 32
 
-    def __init__(self):
+    def __init__(
+            self,
+            title="All Tracks",
+            noun="track",
+            search_placeholder="Search tracks…",
+            empty_title="Your library is empty",
+            empty_description="Add music to your library to get started.",
+            empty_icon="folder-music-symbolic",
+            track_filter=None,
+    ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        # The Library and the Compilations page are this same view; they only
+        # differ by these texts and by which tracks they accept.
+        self._title = title
+        self._noun = noun
+        self._search_placeholder = search_placeholder
+        self._empty_title = empty_title
+        self._empty_description = empty_description
+        self._empty_icon = empty_icon
+        self._track_filter = track_filter
 
         self.tracks = []
         self.playback_manager = None
@@ -51,9 +70,9 @@ class LibraryView(Gtk.Box):
         self.content_box.append(self.details_container)
 
         self.empty_page = Adw.StatusPage(
-            title="Your library is empty",
-            description="Add music to your library to get started.",
-            icon_name="folder-music-symbolic",
+            title=self._empty_title,
+            description=self._empty_description,
+            icon_name=self._empty_icon,
         )
         self.empty_page.set_vexpand(True)
 
@@ -83,11 +102,11 @@ class LibraryView(Gtk.Box):
         header.set_margin_end(24)
         header.set_margin_top(16)
 
-        title = Gtk.Label(label="All Tracks", xalign=0)
+        title = Gtk.Label(label=self._title, xalign=0)
         title.add_css_class("title-2")
         title.set_hexpand(True)
 
-        self.count_label = Gtk.Label(label="0 tracks")
+        self.count_label = Gtk.Label(label=f"0 {self._noun}s")
         self.count_label.add_css_class("dim-label")
 
         self.sort_dropdown = Gtk.DropDown.new_from_strings([
@@ -103,7 +122,7 @@ class LibraryView(Gtk.Box):
         )
 
         self.search_entry = Gtk.SearchEntry()
-        self.search_entry.set_placeholder_text("Search tracks…")
+        self.search_entry.set_placeholder_text(self._search_placeholder)
         style_header_controls(self.sort_dropdown, self.search_entry)
         self.search_entry.connect(
             "search-changed",
@@ -348,7 +367,7 @@ class LibraryView(Gtk.Box):
         title.set_ellipsize(Pango.EllipsizeMode.END)
 
         album = Gtk.Label(
-            label=str(track.get("album") or "Unknown Album"),
+            label=str(track.get("album") or ""),
             xalign=0,
         )
         album.set_size_request(130, -1)
@@ -428,7 +447,7 @@ class LibraryView(Gtk.Box):
             str(track.get("artist") or "Unknown Artist")
         )
         self.details_album.set_text(
-            str(track.get("album") or "Unknown Album")
+            str(track.get("album") or "")
         )
         self.details_duration.set_text(
             self._format_duration(track_length(track))
@@ -554,7 +573,10 @@ class LibraryView(Gtk.Box):
         self._refresh_list()
 
     def set_tracks(self, tracks):
-        self.tracks = list(tracks)
+        self.tracks = [
+            track for track in tracks
+            if self._track_filter is None or self._track_filter(track)
+        ]
         self._refresh_list()
 
     def _update_view(self):
@@ -563,13 +585,11 @@ class LibraryView(Gtk.Box):
         visible_count = len(self._get_filtered_tracks())
 
         if total == 0:
-            self.empty_page.set_title("Your library is empty")
-            self.empty_page.set_description(
-                "Add music to your library to get started."
-            )
+            self.empty_page.set_title(self._empty_title)
+            self.empty_page.set_description(self._empty_description)
             self.stack.set_visible_child_name("empty")
         elif not visible:
-            self.empty_page.set_title("No matching tracks")
+            self.empty_page.set_title(f"No matching {self._noun}s")
             self.empty_page.set_description("Try a different search.")
             self.stack.set_visible_child_name("empty")
         else:
@@ -577,9 +597,9 @@ class LibraryView(Gtk.Box):
 
         if visible_count == total:
             self.count_label.set_text(
-                f"{total} track{'s' if total != 1 else ''}"
+                f"{total} {self._noun}{'s' if total != 1 else ''}"
             )
         else:
             self.count_label.set_text(
-                f"{visible_count} of {total} tracks"
+                f"{visible_count} of {total} {self._noun}s"
             )

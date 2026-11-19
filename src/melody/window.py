@@ -34,8 +34,10 @@ from melody.views import (
     AlbumsView,
     ArtistsView,
     PlaylistsView,
-    PreferencesView,
+    show_preferences_dialog,
 )
+from melody.services.compilations import is_compilation
+from melody.services.settings import get_settings
 from melody.widgets.image_picker import show_image_picker
 from melody.widgets.player_bar import PlayerBar
 
@@ -48,6 +50,10 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self.tracks = []
         self._sync_thread = None
+        # True while a library scan is running; ``_rescan_done`` is told when
+        # the scan a Preferences "Rescan" button started is over.
+        self._syncing = False
+        self._rescan_done = None
         self.playback_manager = PlaybackManager()
         self.library_manager = LibraryManager()
         self.database = self.library_manager.database
@@ -56,18 +62,35 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.database,
         )
 
+        self.settings = get_settings()
+
         self.views = {
-            "Library": LibraryView(),
+            # With compilations enabled the Library only has single tracks,
+            # and the compilations have a page of their own.
+            "Library": LibraryView(
+                track_filter=lambda track: not is_compilation(track),
+            ),
+            "Compilations": LibraryView(
+                title="Compilations",
+                noun="compilation",
+                search_placeholder="Search compilations…",
+                empty_title="No compilations",
+                empty_description=(
+                    "Long audio files such as mixes and live sets "
+                    "appear here."
+                ),
+                empty_icon="media-playlist-consecutive-symbolic",
+                track_filter=is_compilation,
+            ),
             "Albums": AlbumsView(),
             "Artists": ArtistsView(),
             "Playlists": PlaylistsView(),
-            "Preferences": PreferencesView(),
         }
 
-        for name in ("Library", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Albums", "Artists"):
             self.views[name].set_playback_manager(self.playback_manager)
 
-        for name in ("Library", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Albums", "Artists"):
             self.views[name].set_context_actions(
                 self._edit_track,
                 self._choose_playlist_for_track,
@@ -112,6 +135,9 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.set_content(self.navigation)
         self.connect("close-request", self._on_close_request)
 
+        self._update_compilations_ui()
+        self.settings.connect_changed(self._on_settings_changed)
+
         self._select_page("Library")
         self._start_library_sync()
 
@@ -143,6 +169,8 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         for name, icon in [
             ("Library", "audio-x-generic-symbolic"),
+            # Only shown while compilations are enabled.
+            ("Compilations", "media-playlist-consecutive-symbolic"),
             ("Albums", "media-optical-symbolic"),
             ("Artists", "system-users-symbolic"),
             ("Playlists", "view-list-symbolic"),
@@ -161,8 +189,18 @@ class MelodyWindow(Adw.ApplicationWindow):
             "Preferences",
             "emblem-system-symbolic",
         )
-        self.navigation_rows["Preferences"] = preferences_row
-        sidebar.append(preferences_row)
+
+        # Not a page: it opens the preferences in a window of their own.
+        preferences_list = Gtk.ListBox()
+        preferences_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        preferences_list.set_activate_on_single_click(True)
+        preferences_list.add_css_class("navigation-sidebar")
+        preferences_list.connect(
+            "row-activated",
+            lambda _list_box, _row: self._show_preferences(),
+        )
+        preferences_list.append(preferences_row)
+        sidebar.append(preferences_list)
 
         toolbar.set_content(sidebar)
         return Adw.NavigationPage.new(toolbar, "Navigation")
@@ -242,6 +280,27 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.content_toolbar.set_content(layout)
         return Adw.NavigationPage.new(self.content_toolbar, "Content")
 
+    def _show_preferences(self):
+        show_preferences_dialog(self, self.settings, self._rescan_library)
+
+    def _update_compilations_ui(self):
+        """The Compilations page only exists while compilations are enabled."""
+        enabled = self.settings.compilations_enabled
+        self.navigation_rows["Compilations"].set_visible(enabled)
+
+        if (
+                not enabled
+                and self.content_stack.get_visible_child_name() == "compilations"
+        ):
+            self._select_page("Library")
+
+    def _on_settings_changed(self):
+        # Which tracks go where depends on the settings: sort them out again.
+        self._update_compilations_ui()
+
+        for name in ("Library", "Compilations", "Albums", "Artists"):
+            self.views[name].set_tracks(self.tracks)
+
     def _on_navigation_selected(self, list_box, row):
         if row is None:
             return
@@ -263,22 +322,58 @@ class MelodyWindow(Adw.ApplicationWindow):
             )
 
     def _start_library_sync(self):
+        self._syncing = True
         self._sync_thread = threading.Thread(
             target=self._sync_library,
             daemon=True,
         )
         self._sync_thread.start()
 
+    def _rescan_library(self, done=None):
+        """Scan the library again: every file whose path does not match its
+        tags is moved where it belongs, and the pages are refreshed.
+
+        ``done()`` is called when the scan is over. If one is already
+        running, no second one is started and ``done`` waits for that one.
+        Always returns True.
+        """
+        self._rescan_done = done
+
+        if self._syncing:
+            return True
+
+        self.sync_status.set_visible(True)
+        self.sync_status.set_tooltip_text(None)
+        self.sync_spinner.set_visible(True)
+        self.sync_spinner.start()
+        self.sync_status_label.set_text("Scanning music library…")
+
+        self._start_library_sync()
+        return True
+
+    def _finish_sync(self):
+        self._syncing = False
+
+        done, self._rescan_done = self._rescan_done, None
+
+        if done is not None:
+            done()
+
     @staticmethod
     def _album_key(track):
-        return (
-            str(
-                track.get("album_artist")
-                or track.get("artist")
-                or "Unknown Artist"
-            ).casefold(),
-            str(track.get("album") or "Unknown Album").casefold(),
-        )
+        artist = str(
+            track.get("album_artist")
+            or track.get("artist")
+            or "Unknown Artist"
+        ).casefold()
+        album = str(track.get("album") or "")
+
+        # A single has no album, so no cover to share with other tracks: it
+        # is a group of its own.
+        if not album.strip():
+            return (artist, "", track.get("id"))
+
+        return (artist, album.casefold())
 
     def _sync_library(self):
         try:
@@ -333,6 +428,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.playback_manager.set_queue(tracks)
 
         self.views["Library"].set_tracks(tracks)
+        self.views["Compilations"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(
@@ -363,6 +459,7 @@ class MelodyWindow(Adw.ApplicationWindow):
                 self._hide_sync_status,
             )
 
+        self._finish_sync()
         return GLib.SOURCE_REMOVE
 
     def _add_track_to_playlist(self, track, playlist_id):
@@ -446,6 +543,15 @@ class MelodyWindow(Adw.ApplicationWindow):
                     values["start_time"],
                     values["end_time"],
                 )
+
+            if "kind" in values and values["kind"] != track.get("kind"):
+                try:
+                    self.database.set_track_kind(track["id"], values["kind"])
+                except Exception as error:
+                    show_error_dialog(
+                        self, "Could not save the track's kind", error,
+                    )
+                    return
 
             if changed:
                 try:
@@ -824,6 +930,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.tracks = tracks
         self.playback_manager.set_queue(tracks)
         self.views["Library"].set_tracks(tracks)
+        self.views["Compilations"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)
@@ -836,6 +943,7 @@ class MelodyWindow(Adw.ApplicationWindow):
             "Could not synchronize music library"
         )
         self.sync_status.set_tooltip_text(message)
+        self._finish_sync()
         return GLib.SOURCE_REMOVE
 
     def _on_playback_error(self, message):

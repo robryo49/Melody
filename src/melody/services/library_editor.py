@@ -143,15 +143,20 @@ class LibraryEditor:
             artist_folder = _sanitize_name(
                 metadata.album_artist or metadata.artist
             )
-            album_folder = _sanitize_name(metadata.album)
             title = _sanitize_name(metadata.title)
 
-            destination = (
+            # No album means a single: it goes straight in the artist's
+            # folder, with no album folder.
+            if metadata.album.strip():
+                folder = (
                     self.music_folder
                     / artist_folder
-                    / album_folder
-                    / f"{title}{source.suffix}"
-            ).resolve()
+                    / _sanitize_name(metadata.album)
+                )
+            else:
+                folder = self.music_folder / artist_folder
+
+            destination = (folder / f"{title}{source.suffix}").resolve()
 
             self._inside_library(destination)
             operations.append((track, source, destination, metadata))
@@ -331,8 +336,9 @@ class LibraryEditor:
         """Edit one track's title (and file name), artist and album.
 
         The tags are rewritten and the file is moved to
-        ``<album artist>/<album>/<title>.<ext>``. The track's album artist is
-        left untouched.
+        ``<album artist>/<album>/<title>.<ext>``, or to
+        ``<album artist>/<title>.<ext>`` when the album is empty (a single).
+        The track's album artist is left untouched.
         """
         title = title.strip()
         artist = artist.strip()
@@ -342,8 +348,6 @@ class LibraryEditor:
             raise ValueError("A track title cannot be empty")
         if not artist:
             raise ValueError("An artist name cannot be empty")
-        if not album:
-            raise ValueError("An album name cannot be empty")
 
         track = self.database.get_track(track_id)
 
@@ -351,11 +355,14 @@ class LibraryEditor:
             raise LibraryEditError("The selected track no longer exists")
 
         def make_metadata(current):
+            # A track's album artist always matches its artist, so changing the
+            # artist also changes the album artist: the file is then filed
+            # under the new artist, in their own album.
             return TrackMetadata(
                 title=title,
                 artist=artist,
                 album=album,
-                album_artist=current["album_artist"],
+                album_artist=artist,
                 duration=current["duration"],
                 year=current["year"],
                 genre=current["genre"],
@@ -387,6 +394,10 @@ class LibraryEditor:
             if old == new or not old.is_dir():
                 continue
 
+            # An artist's folder holds the artist's own picture (and their
+            # singles), never an album cover: leave it where it is.
+            if old.parent == self.music_folder:
+                continue
             try:
                 entries = list(old.iterdir())
             except OSError:

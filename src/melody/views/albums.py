@@ -14,6 +14,9 @@ from melody.services.collection_actions import (
 )
 from melody.layout import style_header_controls
 from melody.services.track_range import track_length
+from melody.services.compilations import is_compilation
+from melody.services.settings import get_settings
+from melody.services.singles import has_album
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.value_label import value_label
@@ -67,14 +70,67 @@ class AlbumsView(Gtk.Box):
     # Navigation from a track's menu
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _album_key_of_track(track):
+        """(album artist, album title), case-insensitive: what identifies an
+        album, however the track got there."""
+        return (
+            str(
+                track.get("album_artist")
+                or track.get("artist")
+                or "Unknown Artist"
+            ).casefold(),
+            str(track.get("album") or "").casefold(),
+        )
+
     def _album_of_track(self, track):
-        track_id = track.get("id")
+        """The album ``track`` belongs to.
+
+        It is found by name, not by looking for the track in the albums: a
+        compilation is left out of the albums unless the setting says
+        otherwise, but it still belongs to its album, which must stay
+        reachable from the compilation's menu. When the album is not listed at
+        all (it only holds compilations), it is built from every track that
+        shares its name.
+        """
+        key = self._album_key_of_track(track)
+
+        # A single has no album to find.
+        if not has_album(track):
+            return None
 
         for album in self.albums:
-            if any(candidate.get("id") == track_id for candidate in album["tracks"]):
+            if (album["artist"].casefold(), album["title"].casefold()) == key:
                 return album
 
-        return None
+        tracks = [
+            candidate for candidate in self.tracks
+            if self._album_key_of_track(candidate) == key
+        ]
+
+        if not tracks:
+            return None
+
+        tracks.sort(key=lambda item: str(item.get("title") or "").casefold())
+        first = tracks[0]
+
+        return {
+            "artist": str(
+                first.get("album_artist")
+                or first.get("artist")
+                or "Unknown Artist"
+            ),
+            "title": str(first.get("album") or "Unknown Album"),
+            "tracks": tracks,
+            "artwork_path": next(
+                (
+                    item["album_artwork_path"]
+                    for item in tracks
+                    if item.get("album_artwork_path")
+                ),
+                None,
+            ),
+        }
 
     def open_album_of_track(self, track):
         """Show the details of the album ``track`` is in. False if unknown."""
@@ -88,15 +144,13 @@ class AlbumsView(Gtk.Box):
 
     def is_album_open(self, track):
         """True when the details page of ``track``'s album is showing."""
-        album = self._album_of_track(track)
         current = self.current_album
 
         return (
-            album is not None
-            and current is not None
+            current is not None
             and self.stack.get_visible_child_name() == "details"
             and (current["artist"].casefold(), current["title"].casefold())
-            == (album["artist"].casefold(), album["title"].casefold())
+            == self._album_key_of_track(track)
         )
 
     # ------------------------------------------------------------------
@@ -152,7 +206,20 @@ class AlbumsView(Gtk.Box):
 
         self.grid_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid_page.append(self.grid_header)
-        self.grid_page.append(self.grid)
+
+        # "No matching albums" is shown here, under the header, so the search
+        # bar stays on screen and the search can be changed.
+        self.no_match_page = Adw.StatusPage(
+            title="No matching albums",
+            description="Try a different search.",
+            icon_name="media-optical-symbolic",
+        )
+
+        self.grid_stack = Gtk.Stack()
+        self.grid_stack.set_vexpand(True)
+        self.grid_stack.add_named(self.grid, "grid")
+        self.grid_stack.add_named(self.no_match_page, "no-match")
+        self.grid_page.append(self.grid_stack)
 
     def set_tracks(self, tracks):
         selected_track_id = None
@@ -171,14 +238,25 @@ class AlbumsView(Gtk.Box):
 
     def _build_albums(self):
         albums = {}
+        show_compilations = get_settings().show_compilations_in_albums
 
         for track in self.tracks:
+            # A track without an album (a single) is not part of any album.
+            if not has_album(track):
+                continue
+
+            # A compilation is still part of its album, but only listed in it
+            # (and played with it) when the setting says so. An album left
+            # with nothing in it is not shown at all.
+            if is_compilation(track) and not show_compilations:
+                continue
+
             artist = str(
                 track.get("album_artist")
                 or track.get("artist")
                 or "Unknown Artist"
             )
-            title = str(track.get("album") or "Unknown Album")
+            title = str(track.get("album"))
             key = (artist.casefold(), title.casefold())
 
             if key not in albums:
@@ -245,10 +323,11 @@ class AlbumsView(Gtk.Box):
             self.empty_page.set_description("Your albums will appear here.")
             self.stack.set_visible_child_name("empty")
         elif visible == 0:
-            self.empty_page.set_title("No matching albums")
-            self.empty_page.set_description("Try a different search.")
-            self.stack.set_visible_child_name("empty")
+            # Stay on the grid page: its header holds the search bar.
+            self.grid_stack.set_visible_child_name("no-match")
+            self.stack.set_visible_child_name("grid")
         else:
+            self.grid_stack.set_visible_child_name("grid")
             self.stack.set_visible_child_name("grid")
 
         self.count_label.set_text(

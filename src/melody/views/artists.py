@@ -3,6 +3,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
+from pathlib import Path
+
 from gi.repository import Adw, GLib, Gtk, Pango
 
 from melody.services.collection_actions import (
@@ -14,6 +16,9 @@ from melody.services.collection_actions import (
 )
 from melody.layout import style_header_controls
 from melody.services.track_range import track_length
+from melody.services.compilations import is_compilation
+from melody.services.settings import get_settings
+from melody.services.singles import has_album
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.value_label import value_label
@@ -21,6 +26,8 @@ from melody.widgets.value_label import value_label
 
 class ArtistsView(Gtk.Box):
     ALBUM_COVER_SIZE = 64
+    # Same size as the thumbnails in the Library and Compilations lists.
+    COMPILATION_THUMBNAIL_SIZE = 32
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -79,15 +86,18 @@ class ArtistsView(Gtk.Box):
     # Navigation from a track's menu
     # ------------------------------------------------------------------
 
-    def _album_of_track(self, track):
-        track_id = track.get("id")
-
-        for artist in self.artists:
-            for album in artist["albums"]:
-                if any(candidate.get("id") == track_id for candidate in album["tracks"]):
-                    return album
-
-        return None
+    @staticmethod
+    def _album_key_of_track(track):
+        """(album artist, album title), case-insensitive: what identifies an
+        album, even for a compilation that is not listed in it."""
+        return (
+            str(
+                track.get("album_artist")
+                or track.get("artist")
+                or "Unknown Artist"
+            ).casefold(),
+            str(track.get("album") or "").casefold(),
+        )
 
     def _artist_of_track(self, track):
         """The artist page to open for ``track``.
@@ -105,6 +115,12 @@ class ArtistsView(Gtk.Box):
         track_id = track.get("id")
 
         for artist in self.artists:
+            if any(
+                candidate.get("id") == track_id
+                for candidate in (*artist["compilations"], *artist["singles"])
+            ):
+                return artist
+
             for album in artist["albums"]:
                 if any(candidate.get("id") == track_id for candidate in album["tracks"]):
                     return artist
@@ -123,15 +139,13 @@ class ArtistsView(Gtk.Box):
 
     def is_album_open(self, track):
         """True when the page of ``track``'s album is showing."""
-        album = self._album_of_track(track)
         current = self.current_album
 
         return (
-            album is not None
-            and current is not None
+            current is not None
             and self.stack.get_visible_child_name() == "album"
             and (current["artist"].casefold(), current["title"].casefold())
-            == (album["artist"].casefold(), album["title"].casefold())
+            == self._album_key_of_track(track)
         )
 
     def is_artist_open(self, track):
@@ -204,7 +218,20 @@ class ArtistsView(Gtk.Box):
 
         self.grid_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid_page.append(self.grid_header)
-        self.grid_page.append(self.grid)
+
+        # "No matching artists" is shown here, under the header, so the search
+        # bar stays on screen and the search can be changed.
+        self.no_match_page = Adw.StatusPage(
+            title="No matching artists",
+            description="Try a different search.",
+            icon_name="system-users-symbolic",
+        )
+
+        self.grid_stack = Gtk.Stack()
+        self.grid_stack.set_vexpand(True)
+        self.grid_stack.add_named(self.grid, "grid")
+        self.grid_stack.add_named(self.no_match_page, "no-match")
+        self.grid_page.append(self.grid_stack)
 
     def _build_artist_details(self):
         self.artist_page = Gtk.Box(
@@ -334,7 +361,64 @@ class ArtistsView(Gtk.Box):
         album_scroll.set_margin_start(24)
         album_scroll.set_margin_end(24)
         album_scroll.set_margin_bottom(16)
-        album_scroll.set_child(self.artist_album_list)
+        # Each kind of music gets its own titled section, in this order:
+        # albums, compilations, singles. A section is hidden when the artist
+        # has nothing in it.
+        self.artist_albums_heading = Gtk.Label(
+            label="Albums",
+            xalign=0,
+        )
+        self.artist_albums_heading.add_css_class("title-4")
+
+        # The artist's compilations: a list like the albums one above, but
+        # made of track rows.
+        self.artist_compilations_heading = Gtk.Label(
+            label="Compilations",
+            xalign=0,
+        )
+        self.artist_compilations_heading.add_css_class("title-4")
+
+        self.artist_compilation_list = Gtk.ListBox()
+        self.artist_compilation_list.set_selection_mode(
+            Gtk.SelectionMode.NONE
+        )
+        self.artist_compilation_list.set_activate_on_single_click(False)
+        self.artist_compilation_list.add_css_class("boxed-list")
+        self.artist_compilation_list.connect(
+            "row-activated",
+            self._on_compilation_activated,
+        )
+
+        # The artist's singles (tracks without an album): track rows too.
+        self.artist_singles_heading = Gtk.Label(
+            label="Singles",
+            xalign=0,
+        )
+        self.artist_singles_heading.add_css_class("title-4")
+
+        self.artist_single_list = Gtk.ListBox()
+        self.artist_single_list.set_selection_mode(
+            Gtk.SelectionMode.NONE
+        )
+        self.artist_single_list.set_activate_on_single_click(False)
+        self.artist_single_list.add_css_class("boxed-list")
+        self.artist_single_list.connect(
+            "row-activated",
+            self._on_single_activated,
+        )
+
+        artist_sections = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=16,
+        )
+        artist_sections.append(self.artist_albums_heading)
+        artist_sections.append(self.artist_album_list)
+        artist_sections.append(self.artist_compilations_heading)
+        artist_sections.append(self.artist_compilation_list)
+        artist_sections.append(self.artist_singles_heading)
+        artist_sections.append(self.artist_single_list)
+
+        album_scroll.set_child(artist_sections)
         self.artist_page.append(album_scroll)
 
     def _build_album_details(self):
@@ -485,6 +569,14 @@ class ArtistsView(Gtk.Box):
     def set_tracks(self, tracks):
         selected_album_track_id = None
         selected_artist_track_id = None
+        selected_artist_name = (
+            self.current_artist["name"].casefold()
+            if (
+                self.current_artist is not None
+                and self.stack.get_visible_child_name() == "artist"
+            )
+            else None
+        )
         if self.current_album and self.current_album.get("tracks"):
             selected_album_track_id = self.current_album["tracks"][0].get("id")
         elif self.current_artist:
@@ -507,6 +599,14 @@ class ArtistsView(Gtk.Box):
                             self._show_album(album)
                         return
 
+        # An artist with no album (only singles and/or compilations): stay
+        # on their page, found by name.
+        if selected_artist_name is not None:
+            for artist in self.artists:
+                if artist["name"].casefold() == selected_artist_name:
+                    self._show_artist(artist)
+                    return
+
     def _build_artists(self):
         artists = {}
 
@@ -516,7 +616,7 @@ class ArtistsView(Gtk.Box):
                 or track.get("artist")
                 or "Unknown Artist"
             )
-            album_title = str(track.get("album") or "Unknown Album")
+            album_title = str(track.get("album") or "")
 
             artist_key = artist_name.casefold()
             album_key = album_title.casefold()
@@ -525,10 +625,28 @@ class ArtistsView(Gtk.Box):
                 artists[artist_key] = {
                     "name": artist_name,
                     "albums": {},
+                    "compilations": [],
+                    "singles": [],
                     "artwork_path": None,
                 }
 
             artist = artists[artist_key]
+
+            # Every compilation is listed under its artist. It is also part
+            # of its album only when the setting says so (and only if it has
+            # an album at all).
+            if is_compilation(track):
+                artist["compilations"].append(track)
+
+                if (
+                        not get_settings().show_compilations_in_albums
+                        or not has_album(track)
+                ):
+                    continue
+            elif not has_album(track):
+                # No album: a single, listed under its artist on its own.
+                artist["singles"].append(track)
+                continue
 
             if album_key not in artist["albums"]:
                 artist["albums"][album_key] = {
@@ -561,20 +679,46 @@ class ArtistsView(Gtk.Box):
             albums.sort(key=lambda album: album["title"].casefold())
 
             artist["albums"] = albums
-            artist["track_count"] = sum(
-                len(album["tracks"]) for album in albums
+            artist["compilations"].sort(
+                key=lambda track: str(track.get("title") or "").casefold()
             )
+            artist["singles"].sort(
+                key=lambda track: str(track.get("title") or "").casefold()
+            )
+            # Album tracks only: compilations and singles are counted on
+            # their own.
+            artist["track_count"] = sum(
+                1
+                for album in albums
+                for track in album["tracks"]
+                if not is_compilation(track)
+            )
+            all_tracks = [
+                track for album in albums for track in album["tracks"]
+            ] + artist["compilations"] + artist["singles"]
             # The artist's own picture (an image in their folder) if they
             # have one, otherwise the cover of their first album.
             artist["artwork_path"] = next(
                 (
                     track["artist_artwork_path"]
-                    for album in albums
-                    for track in album["tracks"]
+                    for track in all_tracks
                     if track.get("artist_artwork_path")
                 ),
                 None,
-            ) or (albums[0]["artwork_path"] if albums else None)
+            ) or (
+                albums[0]["artwork_path"] if albums
+                else next(
+                    (
+                        track["album_artwork_path"]
+                        for track in (
+                            *artist["compilations"],
+                            *artist["singles"],
+                        )
+                        if track.get("album_artwork_path")
+                    ),
+                    None,
+                )
+            )
 
             self.artists.append(artist)
 
@@ -639,10 +783,11 @@ class ArtistsView(Gtk.Box):
             )
             self.stack.set_visible_child_name("empty")
         elif visible == 0:
-            self.empty_page.set_title("No matching artists")
-            self.empty_page.set_description("Try a different search.")
-            self.stack.set_visible_child_name("empty")
+            # Stay on the grid page: its header holds the search bar.
+            self.grid_stack.set_visible_child_name("no-match")
+            self.stack.set_visible_child_name("grid")
         else:
+            self.grid_stack.set_visible_child_name("grid")
             self.stack.set_visible_child_name("grid")
 
         if visible == total:
@@ -662,11 +807,31 @@ class ArtistsView(Gtk.Box):
     def _describe_artist(artist):
         album_count = len(artist["albums"])
         track_count = artist["track_count"]
-        subtitle = (
-            f"{album_count} album{'s' if album_count != 1 else ''}"
-            f" · {track_count} track{'s' if track_count != 1 else ''}"
-        )
-        return artist["name"], subtitle, artist.get("artwork_path")
+        compilation_count = len(artist["compilations"])
+        single_count = len(artist["singles"])
+
+        parts = []
+
+        if album_count or not (compilation_count or single_count):
+            parts.append(
+                f"{album_count} album{'s' if album_count != 1 else ''}"
+            )
+            parts.append(
+                f"{track_count} track{'s' if track_count != 1 else ''}"
+            )
+
+        if single_count:
+            parts.append(
+                f"{single_count} single{'s' if single_count != 1 else ''}"
+            )
+
+        if compilation_count:
+            parts.append(
+                f"{compilation_count} compilation"
+                f"{'s' if compilation_count != 1 else ''}"
+            )
+
+        return artist["name"], " · ".join(parts), artist.get("artwork_path")
 
     def _is_artist_playing(self, artist):
         if self.playback_manager is None:
@@ -679,8 +844,15 @@ class ArtistsView(Gtk.Box):
         current_path = current_track.get("path")
         return any(
             track.get("path") == current_path
-            for album in artist["albums"]
-            for track in album["tracks"]
+            for track in [
+                *(
+                    track
+                    for album in artist["albums"]
+                    for track in album["tracks"]
+                ),
+                *artist["compilations"],
+                *artist["singles"],
+            ]
         )
 
     def _is_album_playing(self, album):
@@ -773,11 +945,12 @@ class ArtistsView(Gtk.Box):
         self._play_tracks(album["tracks"], start_track)
 
     def _play_artist(self, artist):
+        # The albums' tracks, then the singles.
         tracks = [
             track
             for album in artist["albums"]
             for track in album["tracks"]
-        ]
+        ] + artist["singles"]
         self._play_tracks(tracks)
 
     def _on_artist_play_clicked(self, button):
@@ -787,6 +960,14 @@ class ArtistsView(Gtk.Box):
     def _on_album_play_clicked(self, button):
         if self.current_album is not None:
             self._toggle_album(self.current_album)
+
+    def _on_compilation_activated(self, list_box, row):
+        if self.current_artist is not None:
+            self._play_tracks(self.current_artist["compilations"], row.track)
+
+    def _on_single_activated(self, list_box, row):
+        if self.current_artist is not None:
+            self._play_tracks(self.current_artist["singles"], row.track)
 
     def _on_album_track_activated(self, list_box, row):
         if self.current_album is not None:
@@ -817,6 +998,16 @@ class ArtistsView(Gtk.Box):
         )
         self.artist_track_count.set_text(
             f"{track_count} track{'s' if track_count != 1 else ''}"
+            + (
+                f" · {len(artist['singles'])} single"
+                f"{'s' if len(artist['singles']) != 1 else ''}"
+                if artist["singles"] else ""
+            )
+            + (
+                f" · {len(artist['compilations'])} compilation"
+                f"{'s' if len(artist['compilations']) != 1 else ''}"
+                if artist["compilations"] else ""
+            )
         )
 
         self._set_artist_artwork(artist)
@@ -832,6 +1023,43 @@ class ArtistsView(Gtk.Box):
             self.artist_album_list.append(
                 self._create_album_row(album)
             )
+
+        # The compilations, as track rows.
+        child = self.artist_compilation_list.get_first_child()
+
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self.artist_compilation_list.remove(child)
+            child = next_child
+
+        for track in artist["compilations"]:
+            self.artist_compilation_list.append(
+                self._create_track_row(track, show_artwork=True)
+            )
+
+        # The singles, as track rows.
+        child = self.artist_single_list.get_first_child()
+
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self.artist_single_list.remove(child)
+            child = next_child
+
+        for track in artist["singles"]:
+            self.artist_single_list.append(
+                self._create_track_row(track, show_artwork=True)
+            )
+
+        self.artist_albums_heading.set_visible(bool(artist["albums"]))
+        self.artist_album_list.set_visible(bool(artist["albums"]))
+        self.artist_compilations_heading.set_visible(
+            bool(artist["compilations"])
+        )
+        self.artist_compilation_list.set_visible(
+            bool(artist["compilations"])
+        )
+        self.artist_singles_heading.set_visible(bool(artist["singles"]))
+        self.artist_single_list.set_visible(bool(artist["singles"]))
 
         self.stack.set_visible_child_name("artist")
         self._update_play_buttons()
@@ -954,7 +1182,7 @@ class ArtistsView(Gtk.Box):
         self.stack.set_visible_child_name("album")
         self._update_play_buttons()
 
-    def _create_track_row(self, track):
+    def _create_track_row(self, track, show_artwork=False):
         row = Gtk.ListBoxRow()
         row.track = track
 
@@ -964,8 +1192,27 @@ class ArtistsView(Gtk.Box):
         )
         content.set_margin_start(12)
         content.set_margin_end(12)
-        content.set_margin_top(8)
-        content.set_margin_bottom(8)
+        content.set_margin_top(6 if show_artwork else 8)
+        content.set_margin_bottom(6 if show_artwork else 8)
+
+        if show_artwork:
+            # The compilation's artwork, like in the Compilations page.
+            artwork = Gtk.Image.new_from_icon_name(
+                "audio-x-generic-symbolic"
+            )
+            artwork.set_pixel_size(self.COMPILATION_THUMBNAIL_SIZE)
+            artwork.set_size_request(
+                self.COMPILATION_THUMBNAIL_SIZE,
+                self.COMPILATION_THUMBNAIL_SIZE,
+            )
+
+            artwork_path = track.get("artwork_path")
+
+            if artwork_path and Path(artwork_path).is_file():
+                artwork.set_from_file(artwork_path)
+                artwork.set_pixel_size(self.COMPILATION_THUMBNAIL_SIZE)
+
+            content.append(artwork)
 
         title = Gtk.Label(
             label=str(track.get("title") or "Unknown Title"),
@@ -995,7 +1242,21 @@ class ArtistsView(Gtk.Box):
         return row
 
     def _toggle_track(self, track):
-        queue = self.current_album["tracks"] if self.current_album else [track]
+        if self.current_album:
+            queue = self.current_album["tracks"]
+        elif self.current_artist and any(
+                candidate.get("id") == track.get("id")
+                for candidate in self.current_artist["compilations"]
+        ):
+            queue = self.current_artist["compilations"]
+        elif self.current_artist and any(
+                candidate.get("id") == track.get("id")
+                for candidate in self.current_artist["singles"]
+        ):
+            queue = self.current_artist["singles"]
+        else:
+            queue = [track]
+
         toggle_track_playback(self.playback_manager, track, queue)
         self._update_play_buttons()
 

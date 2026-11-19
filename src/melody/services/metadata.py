@@ -51,7 +51,9 @@ def read_metadata(path: Path) -> TrackMetadata:
 
     title = _get_tag(tags, "title", path.stem)
     artist = _get_tag(tags, "artist", "Unknown Artist")
-    album = _get_tag(tags, "album", "Unknown Album")
+    # No album tag means a single: it is kept as an empty string (never a
+    # placeholder name) so the file is filed in the artist's folder.
+    album = _get_tag(tags, "album", "")
     album_artist = _get_tag(tags, "albumartist", artist)
 
     return TrackMetadata(

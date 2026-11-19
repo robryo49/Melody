@@ -78,6 +78,16 @@ def organize_file(entry: ScanEntry, root: Path) -> Path:
             f"Could not organize {source}: {error}"
         ) from error
 
+    # Remove the folders the move left empty (an old "Unknown Album" folder,
+    # say), but never the music root itself.
+    parent = source.parent
+    while parent != root:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
     return destination
 
 
