@@ -672,8 +672,10 @@ def show_edit_dialog(
         install_cover_css()
         cover_stack.add_css_class("round-cover")
     cover_stack.set_size_request(cover_size, cover_size)
-    cover_stack.set_halign(Gtk.Align.START)
-    cover_stack.set_valign(Gtk.Align.START)
+    # Fill the square the overlay below reserves for it, instead of taking
+    # the picture's own size.
+    cover_stack.set_halign(Gtk.Align.FILL)
+    cover_stack.set_valign(Gtk.Align.FILL)
     cover_stack.add_named(cover, "artwork")
     cover_stack.add_named(placeholder, "placeholder")
     cover_stack.set_visible_child_name("placeholder")
@@ -722,7 +724,15 @@ def show_edit_dialog(
     cover_overlay.set_halign(Gtk.Align.START)
     cover_overlay.set_valign(Gtk.Align.START)
     cover_overlay.set_size_request(cover_size, cover_size)
-    cover_overlay.set_child(cover_stack)
+    # The overlay is sized by an empty square, and the cover is laid over it:
+    # an overlaid widget never changes the overlay's size, so the cover keeps
+    # the same size whether it shows the default icon, a picture loaded from
+    # the file or one just picked (a picture's own size used to leak through
+    # and made the cover jump).
+    cover_sizer = Gtk.Box()
+    cover_sizer.set_size_request(cover_size, cover_size)
+    cover_overlay.set_child(cover_sizer)
+    cover_overlay.add_overlay(cover_stack)
 
     edit_image_button = None
     if image_sources is not None:
