@@ -8,6 +8,7 @@ from gi.repository import Adw, GLib, Gtk, Pango
 from melody.services.collection_actions import (
     SORT_OPTIONS,
     attach_track_context_menu,
+    open_artist_named,
     sort_tracks,
     toggle_track_playback,
     track_is_playing,
@@ -367,6 +368,7 @@ class AlbumsView(Gtk.Box):
             play_tooltip="Play album",
             on_edit=self._on_edit_album_from_grid,
             open_in_menu=True,
+            on_open_artist=self._on_open_album_artist,
         )
 
         total = len(self.albums)
@@ -391,6 +393,10 @@ class AlbumsView(Gtk.Box):
         )
 
         self._update_play_buttons()
+
+    @staticmethod
+    def _on_open_album_artist(album):
+        open_artist_named(album["artist"])
 
     def _on_edit_album_from_grid(self, album):
         if self.on_rename_album is not None:

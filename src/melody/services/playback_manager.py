@@ -41,6 +41,9 @@ class PlaybackManager:
         self.on_track_changed = None
         self.on_state_changed = None
         self.on_error = None
+        # Called with the new position (seconds into the track) after a
+        # seek, so the rest of the desktop can be told (see mpris.py).
+        self.on_seeked = None
 
         self.player.set_property("volume", self.volume)
 
@@ -289,7 +292,13 @@ class PlaybackManager:
             self._pending_seek = max(0.0, float(position))
             return True
 
-        return self._seek_range(position)
+        result = self._seek_range(position)
+
+        if result and self.on_seeked:
+            start, _end = self._track_range(self.current_track)
+            self.on_seeked(max(0.0, float(position) - start))
+
+        return result
 
     def _seek_range(self, position):
         """Seek to ``position``, kept inside the track's start / end.

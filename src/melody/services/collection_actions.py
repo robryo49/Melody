@@ -1313,6 +1313,46 @@ def show_playlist_picker_dialog(
 # Track context menu
 # ----------------------------------------------------------------------
 
+# Compact look shared by every right-click menu. The default popover padding,
+# the box margins and the buttons' own padding all added up to a thick border
+# and tall rows, so they are tightened here in one place.
+MENU_PADDING = 6
+MENU_WIDTH = 150  # total width of every menu, whatever its entries say
+MENU_ITEM_PADDING_Y = 6
+MENU_ITEM_PADDING_X = 6
+
+_MENU_CSS = f"""
+popover.context-menu > contents {{
+    padding: {MENU_PADDING}px;
+}}
+popover.context-menu button.flat {{
+    min-height: 0;
+    padding: {MENU_ITEM_PADDING_Y}px {MENU_ITEM_PADDING_X}px;
+}}
+popover.context-menu separator {{
+    margin: {MENU_PADDING}px 0;
+}}
+"""
+_menu_css_installed = False
+
+
+def _style_context_menu(popover):
+    """Give ``popover`` the compact context-menu style (CSS installed once)."""
+    global _menu_css_installed
+    if not _menu_css_installed:
+        display = Gdk.Display.get_default()
+        if display is not None:
+            provider = Gtk.CssProvider()
+            provider.load_from_string(_MENU_CSS)
+            Gtk.StyleContext.add_provider_for_display(
+                display,
+                provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+            _menu_css_installed = True
+    popover.add_css_class("context-menu")
+
+
 # "Open album" / "Open artist" navigate the whole window, so the window
 # registers them once here and every track menu (library, albums, artists,
 # playlists) picks them up.
@@ -1342,6 +1382,16 @@ def set_track_navigation(
         album_is_open=album_is_open,
         artist_is_open=artist_is_open,
     )
+
+
+def open_artist_named(name):
+    """Open the page of the artist called ``name`` (used by the album cards'
+    "Open artist" entry). Does nothing until the window has registered the
+    navigation with ``set_track_navigation``."""
+    open_artist = _track_navigation["open_artist"]
+
+    if open_artist is not None:
+        open_artist({"artist": name})
 
 
 # "Delete" in a track's menu removes the track from the whole library, so,
@@ -1387,20 +1437,14 @@ def attach_track_context_menu(
 
         popover = Gtk.Popover()
         popover.set_parent(row)
+        _style_context_menu(popover)
         # Like a native context menu: no arrow, with the menu's top-left
         # corner at the pointer.
         popover.set_has_arrow(False)
         popover.set_halign(Gtk.Align.START)
         popover.set_position(Gtk.PositionType.BOTTOM)
 
-        menu = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=2,
-        )
-        menu.set_margin_top(6)
-        menu.set_margin_bottom(6)
-        menu.set_margin_start(6)
-        menu.set_margin_end(6)
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         def add_item(label, callback):
             button = Gtk.Button()
@@ -1417,6 +1461,7 @@ def attach_track_context_menu(
             menu.append(button)
 
         add_item("Pause" if is_playing(track) else "Play", on_play_pause)
+        menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         navigation = _track_navigation
         if (
@@ -1429,10 +1474,11 @@ def attach_track_context_menu(
             add_item("Open artist", navigation["open_artist"])
 
         add_item("Edit…", on_edit)
+
+        menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         add_item("Add to playlist…", on_add_to_playlist)
 
         if on_remove_from_playlist is not None:
-            menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
             add_item("Remove from playlist", on_remove_from_playlist)
 
         if _track_deletion["delete"] is not None:
@@ -1441,6 +1487,7 @@ def attach_track_context_menu(
 
         # (x, y) are relative to ``row``, which is what the popover is
         # parented to, so point at them directly.
+        menu.set_size_request(MENU_WIDTH - 2 * MENU_PADDING, -1)
         rect = Gdk.Rectangle()
         rect.x = int(x)
         rect.y = int(y)
@@ -1461,6 +1508,7 @@ def attach_context_menu(widget, get_entries):
 
     ``get_entries()`` is called when the menu opens and returns a list of
     ``(label, callback)`` pairs, so labels like Play/Pause are always current.
+    A ``None`` in the list is drawn as a separator.
     """
     gesture = Gtk.GestureClick.new()
     gesture.set_button(3)
@@ -1468,15 +1516,12 @@ def attach_context_menu(widget, get_entries):
     def on_pressed(_gesture, _press_count, x, y):
         popover = Gtk.Popover()
         popover.set_parent(widget)
+        _style_context_menu(popover)
         popover.set_has_arrow(False)
         popover.set_halign(Gtk.Align.START)
         popover.set_position(Gtk.PositionType.BOTTOM)
 
-        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        menu.set_margin_top(6)
-        menu.set_margin_bottom(6)
-        menu.set_margin_start(6)
-        menu.set_margin_end(6)
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         def add_item(label, callback):
             button = Gtk.Button()
@@ -1492,8 +1537,17 @@ def attach_context_menu(widget, get_entries):
             button.connect("clicked", activate)
             menu.append(button)
 
-        for label, callback in get_entries():
+        for entry in get_entries():
+            if entry is None:
+                menu.append(
+                    Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+                )
+                continue
+
+            label, callback = entry
             add_item(label, callback)
+
+        menu.set_size_request(MENU_WIDTH - 2 * MENU_PADDING, -1)
 
         rect = Gdk.Rectangle()
         rect.x = int(x)

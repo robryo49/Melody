@@ -167,7 +167,7 @@ class PlayerBar(Gtk.Box):
         )
         self.play_button = self._create_button(
             "media-playback-start-symbolic",
-            self._on_play_clicked,
+            self.press_play,
         )
         self.next_button = self._create_button(
             "media-skip-forward-symbolic",
@@ -292,7 +292,9 @@ class PlayerBar(Gtk.Box):
         button.connect("clicked", lambda _button: callback())
         return button
 
-    def _on_play_clicked(self):
+    def press_play(self):
+        """What the play button does: with nothing loaded it plays the
+        selected track (if there is one), otherwise it plays or pauses."""
         if (
                 self.playback_manager.current_track is None
                 and self.on_play_idle is not None
@@ -333,6 +335,16 @@ class PlayerBar(Gtk.Box):
 
         self.progress.set_sensitive(True)
         self._update_progress()
+
+    def sync_options(self):
+        """Show the repeat and shuffle modes the player is really in: they
+        can be changed from outside the bar (by the media keys, for one)."""
+        self._update_repeat_button()
+        self._update_shuffle_button()
+
+    def set_volume(self, volume):
+        """Move the volume slider, which sets the player's volume."""
+        self.volume.set_value(volume)
 
     def update_playback_state(self, state):
         icon = (

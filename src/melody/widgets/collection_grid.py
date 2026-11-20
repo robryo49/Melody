@@ -77,6 +77,7 @@ class CollectionCard(Gtk.Box):
             on_open=None,
             on_delete=None,
             round_cover=False,
+            on_open_artist=None,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -155,19 +156,31 @@ class CollectionCard(Gtk.Box):
         # --- right-click menu -------------------------------------------
         if on_edit is not None:
             def menu_entries():
+                # Play, then what opens or edits the item, then Delete,
+                # each group separated from the next (None = separator).
                 entries = [
                     (
                         "Pause" if self._playing else "Play",
                         lambda: on_play(self.item),
                     ),
+                    None,
                 ]
 
                 if on_open is not None:
                     entries.append(("Open", lambda: on_open(self.item)))
 
+                if on_open_artist is not None:
+                    entries.append(
+                        (
+                            "Open artist",
+                            lambda: on_open_artist(self.item),
+                        )
+                    )
+
                 entries.append(("Edit…", lambda: on_edit(self.item)))
 
                 if on_delete is not None:
+                    entries.append(None)
                     entries.append(
                         ("Delete", lambda: on_delete(self.item))
                     )
@@ -242,6 +255,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
             on_edit=None,
             open_in_menu=False,
             on_delete=None,
+            on_open_artist=None,
     ):
         """Rebuild the grid.
 
@@ -250,7 +264,8 @@ class CollectionGrid(Gtk.ScrolledWindow):
         ``on_edit(item)``, if given, adds an "Edit…" entry to the cards'
         right-click menu (which also has Play/Pause). With ``open_in_menu``
         the menu also gets an "Open" entry, which does what clicking the
-        card does. With ``on_delete(item)`` it gets a "Delete" entry too.
+        card does. With ``on_delete(item)`` it gets a "Delete" entry too, and
+        with ``on_open_artist(item)`` an "Open artist" entry next to "Open".
         """
         self.flow_box.remove_all()
         self.cards = []
@@ -269,6 +284,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
                 self._on_open if open_in_menu else None,
                 on_delete,
                 round_cover=self._round_covers,
+                on_open_artist=on_open_artist,
             )
             self.flow_box.append(card)
             self.cards.append(card)

@@ -31,6 +31,7 @@ from melody.services.library_scanner import _sanitize_name
 from melody.services.image_sources import album_sources, artist_sources
 from melody.services.playlist_artwork import set_playlist_cover
 from melody.services.playback_manager import PlaybackManager
+from melody.services.mpris import MprisService
 from melody.views import (
     LibraryView,
     AlbumsView,
@@ -293,6 +294,18 @@ class MelodyWindow(Adw.ApplicationWindow):
         )
         self.playback_manager.on_error = self._on_playback_error
         self.player_bar.on_play_idle = self._play_selected_track
+
+        # Media keys, the shell's media widget and playerctl can see and
+        # control the player.
+        self.mpris = MprisService(
+            self.playback_manager,
+            play=self.player_bar.press_play,
+            raise_window=self.present,
+            quit_app=lambda: GLib.idle_add(self.close),
+            sync_options=self.player_bar.sync_options,
+            set_volume=self.player_bar.set_volume,
+        )
+        self.mpris.start()
 
         layout = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -1299,6 +1312,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _on_close_request(self, window):
+        self.mpris.close()
         self.playback_manager.close()
         self._discard_downloads()
         return False
