@@ -1,16 +1,22 @@
 
 import random
+import time
 
 import gi
 
 from melody.services.track_range import track_range
 
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+from gi.repository import GLib, Gst
 
 
 class PlaybackManager:
     REPEAT_MODES = ("off", "all", "one")
+
+    # A track counts as played once it has actually been listened to for half
+    # of its length, or for this many seconds if that comes first. Skipping
+    # through a track does not count, and neither does seeking ahead.
+    PLAY_COUNT_MAX_SECONDS = 240.0
 
     def __init__(self):
         Gst.init(None)
@@ -26,6 +32,10 @@ class PlaybackManager:
         self.queue = []
         self.current_index = -1
         self.current_track = None
+        # What the queue was started from (an album, an artist, a playlist, the
+        # Library...), or None when it was none of those. See
+        # ``collection_actions.playback_source``.
+        self.source = None
         self.state = "stopped"
         self.volume = 0.5
 
@@ -45,14 +55,135 @@ class PlaybackManager:
         # seek, so the rest of the desktop can be told (see mpris.py).
         self.on_seeked = None
 
+        # Called with the track when it has been listened to long enough to
+        # count as a play (see ``_play_threshold``).
+        self.on_play_counted = None
+        self._listened = 0.0
+        self._play_counted = False
+        self._last_tick = time.monotonic()
+
         self.player.set_property("volume", self.volume)
+        GLib.timeout_add(1000, self._tick)
 
     def set_queue(self, tracks):
         self.queue = list(tracks)
         self.current_index = -1
+        self.source = None
         self._reset_shuffle()
 
-    def play_queue(self, tracks, index=0):
+    def refresh_tracks(self, tracks):
+        """The library was reloaded (something was edited, imported or
+        scanned): bring the queue up to date without disturbing playback.
+
+        Tracks are matched by id. The queue keeps its tracks and its order,
+        but each one becomes the fresh copy (its path, tags and artwork may
+        have changed), and the track being played keeps its place in it, so
+        repeat, next and previous carry on as before. Tracks that no longer
+        exist are dropped. With nothing playing, the queue simply becomes the
+        whole library, as with ``set_queue``.
+        """
+        current = self.current_track
+
+        if current is None:
+            self.set_queue(tracks)
+            return
+
+        fresh = {track.get("id"): track for track in tracks}
+        old_ids = [track.get("id") for track in self.queue]
+        old_current_index = self.current_index
+
+        # Keep what is still in the library, in the same order. The same
+        # track can be queued more than once ("Add to queue"), so remember
+        # where each kept entry ended up: the playing one is then still the
+        # same entry, not just the first with its id.
+        new_queue = []
+        index_map = {}
+
+        for old_index, track in enumerate(self.queue):
+            if track.get("id") in fresh:
+                index_map[old_index] = len(new_queue)
+                new_queue.append(fresh[track.get("id")])
+
+        self.queue = new_queue
+        new_ids = [track.get("id") for track in self.queue]
+
+        current_id = current.get("id")
+
+        if current_id in fresh:
+            # Playing from the fresh copy, so a repeat reloads the file at its
+            # new path if an edit moved it.
+            self.current_track = fresh[current_id]
+
+            new_index = index_map.get(old_current_index)
+
+            if new_index is None or new_ids[new_index] != current_id:
+                if current_id not in new_ids:
+                    self.queue.append(self.current_track)
+                    new_ids.append(current_id)
+
+                new_index = new_ids.index(current_id)
+
+            self.current_index = new_index
+        else:
+            # Gone from the library: nothing to keep playing.
+            self.stop()
+            self.queue = list(tracks)
+            self._reset_shuffle()
+            return
+
+        if new_ids != old_ids:
+            # The queue's shape changed, so the shuffle order no longer fits.
+            self._reset_shuffle(self.current_index)
+
+    def play_after_current(self, track):
+        """Queue ``track`` to play right after the current one (shuffle
+        included). With nothing playing, just play it."""
+        if not 0 <= self.current_index < len(self.queue):
+            self.play_track(track)
+            return
+
+        self._insert_in_queue(self.current_index + 1, track, next_up=True)
+
+    def add_to_queue(self, track):
+        """Queue ``track`` at the end (somewhere in what is left when shuffle
+        is on). With nothing playing, just play it."""
+        if not 0 <= self.current_index < len(self.queue):
+            self.play_track(track)
+            return
+
+        self._insert_in_queue(len(self.queue), track, next_up=False)
+
+    def _insert_in_queue(self, position, track, next_up):
+        self.queue.insert(position, track)
+
+        if not self.shuffle:
+            return
+
+        # The shuffle order is made of positions in the queue: those from the
+        # new track on moved down by one.
+        self._shuffle_remaining = [
+            index + 1 if index >= position else index
+            for index in self._shuffle_remaining
+        ]
+        self._shuffle_history = [
+            index + 1 if index >= position else index
+            for index in self._shuffle_history
+        ]
+
+        if next_up:
+            self._shuffle_history.insert(
+                self._shuffle_history_position + 1,
+                position,
+            )
+        else:
+            self._shuffle_remaining.insert(
+                random.randint(0, len(self._shuffle_remaining)),
+                position,
+            )
+
+    def play_queue(self, tracks, index=0, source=None):
+        """Play ``tracks`` from ``index``. ``source`` says what they are (the
+        album, artist, playlist... they were started from)."""
         self.queue = list(tracks)
 
         if not self.queue:
@@ -62,6 +193,7 @@ class PlaybackManager:
         if not 0 <= index < len(self.queue):
             raise IndexError("Track index is outside the playback queue")
 
+        self.source = source
         self.current_index = index
         self._reset_shuffle(index)
         self._load_current_track()
@@ -133,6 +265,9 @@ class PlaybackManager:
         self.player.set_property("uri", uri)
 
         self.current_track = track
+        # A new play (a repeated track starts over too).
+        self._listened = 0.0
+        self._play_counted = False
 
         if self.on_track_changed:
             self.on_track_changed(track)
@@ -203,7 +338,13 @@ class PlaybackManager:
         self.player.set_state(Gst.State.NULL)
         self.current_track = None
         self.current_index = -1
+        self.source = None
         self._set_state("stopped")
+
+        # Nothing is playing any more (the queue ended, or it was stopped):
+        # tell the player bar to go back to "Nothing playing".
+        if self.on_track_changed:
+            self.on_track_changed(None)
 
     def _next_shuffle_index(self):
         if self._shuffle_history_position + 1 < len(self._shuffle_history):
@@ -405,6 +546,38 @@ class PlaybackManager:
                     self._set_state("playing")
                 elif new_state == Gst.State.PAUSED and self._pending_seek is None:
                     self._set_state("paused")
+
+    def _play_threshold(self):
+        """Seconds of listening after which the current track counts as played."""
+        length = self.get_clip_duration()
+
+        if length <= 0:
+            return 30.0
+
+        return max(1.0, min(length / 2, self.PLAY_COUNT_MAX_SECONDS))
+
+    def _tick(self):
+        now = time.monotonic()
+        elapsed = now - self._last_tick
+        self._last_tick = now
+
+        if (
+                self.state == "playing"
+                and self.current_track is not None
+                and self._pending_seek is None
+                and not self._play_counted
+        ):
+            # Capped, so a window that was frozen for a while does not count
+            # as time listened.
+            self._listened += min(elapsed, 2.0)
+
+            if self._listened >= self._play_threshold():
+                self._play_counted = True
+
+                if self.on_play_counted:
+                    self.on_play_counted(self.current_track)
+
+        return GLib.SOURCE_CONTINUE
 
     def close(self):
         self.player.set_state(Gst.State.NULL)

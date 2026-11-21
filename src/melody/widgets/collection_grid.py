@@ -18,7 +18,10 @@ gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Gdk, GdkPixbuf, Gtk, Pango
 
-from melody.services.collection_actions import attach_context_menu
+from melody.services.collection_actions import (
+    artwork_menu_entries,
+    attach_context_menu,
+)
 from melody.widgets.cover_style import (
     COVER_RADIUS,
     install_cover_css as _install_css,
@@ -78,6 +81,7 @@ class CollectionCard(Gtk.Box):
             on_delete=None,
             round_cover=False,
             on_open_artist=None,
+            artwork_kind=None,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -177,6 +181,13 @@ class CollectionCard(Gtk.Box):
                         )
                     )
 
+                # Copy / paste the cover (paste only while the clipboard
+                # holds an image), right above Edit.
+                for label, action in artwork_menu_entries(artwork_kind):
+                    entries.append(
+                        (label, lambda action=action: action(self.item))
+                    )
+
                 entries.append(("Edit…", lambda: on_edit(self.item)))
 
                 if on_delete is not None:
@@ -256,6 +267,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
             open_in_menu=False,
             on_delete=None,
             on_open_artist=None,
+            artwork_kind=None,
     ):
         """Rebuild the grid.
 
@@ -265,7 +277,9 @@ class CollectionGrid(Gtk.ScrolledWindow):
         right-click menu (which also has Play/Pause). With ``open_in_menu``
         the menu also gets an "Open" entry, which does what clicking the
         card does. With ``on_delete(item)`` it gets a "Delete" entry too, and
-        with ``on_open_artist(item)`` an "Open artist" entry next to "Open".
+        with ``on_open_artist(item)`` an "Open artist" entry next to "Open". With
+        ``artwork_kind`` ("album", "artist" or "playlist") it gets "Copy" and
+        "Paste" entries for its cover.
         """
         self.flow_box.remove_all()
         self.cards = []
@@ -285,6 +299,7 @@ class CollectionGrid(Gtk.ScrolledWindow):
                 on_delete,
                 round_cover=self._round_covers,
                 on_open_artist=on_open_artist,
+                artwork_kind=artwork_kind,
             )
             self.flow_box.append(card)
             self.cards.append(card)

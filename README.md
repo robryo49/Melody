@@ -98,9 +98,9 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 
 ## TODO
 
-- [ ] Play queue
-- [ ] Import image from Google image
-- [ ] Copy-paste artwork
+- [x] Play queue
+- [ ] ~~Import image from Google image~~
+- [x] Copy-paste artwork
 - [ ] Drag and drop to import
 - [ ] Play count and last played
 - [ ] Favorites

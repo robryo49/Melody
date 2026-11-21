@@ -8,6 +8,9 @@ from gi.repository import Adw, GLib, Gtk, Pango
 from melody.services.collection_actions import (
     SORT_OPTIONS,
     attach_track_context_menu,
+    is_playback_source,
+    playback_source,
+    reveal_track_row,
     sort_tracks,
     toggle_track_playback,
     track_is_playing,
@@ -100,6 +103,21 @@ class PlaylistsView(Gtk.Box):
             for track in self.database.get_playlist_tracks(playlist["id"])
             if track["id"] in by_id
         ]
+
+    def view_playlist(self, playlist_id, track):
+        """Show the page of the playlist with this id and scroll to ``track``
+        in it. False if the playlist no longer exists."""
+        if self.database is None:
+            return False
+
+        playlist = self.database.get_playlist(playlist_id)
+
+        if not playlist:
+            return False
+
+        self._show_playlist(playlist)
+        reveal_track_row(self.track_list, track)
+        return True
 
     # ------------------------------------------------------------------
     # Header and grid
@@ -232,6 +250,7 @@ class PlaylistsView(Gtk.Box):
             on_edit=self._on_edit_playlist_from_grid,
             open_in_menu=True,
             on_delete=self._delete_playlist,
+            artwork_kind="playlist",
         )
 
         self.count_label.set_text(
@@ -475,7 +494,12 @@ class PlaylistsView(Gtk.Box):
             self.current_tracks,
             self.sort_dropdown.get_selected(),
         )
-        toggle_track_playback(self.playback_manager, track, queue)
+        toggle_track_playback(
+            self.playback_manager,
+            track,
+            queue,
+            self._playlist_source(self.current_playlist),
+        )
         self._update_play_buttons()
 
     def _refresh_detail_tracks(self):
@@ -501,30 +525,28 @@ class PlaylistsView(Gtk.Box):
     # ------------------------------------------------------------------
 
     def _is_playlist_playing(self, playlist):
-        if (
-                self.playback_manager is None
-                or self.playback_manager.current_track is None
-        ):
-            return False
-
-        current_path = self.playback_manager.current_track.get("path")
-
-        return any(
-            track.get("path") == current_path
-            for track in self.database.get_playlist_tracks(playlist["id"])
+        """True when the playlist is what is being played (it was started as a
+        playlist), not merely one of its tracks playing."""
+        return is_playback_source(
+            self.playback_manager,
+            "playlist",
+            playlist["id"],
         )
+
+    @staticmethod
+    def _playlist_source(playlist):
+        # A playlist keeps its id when it is renamed, so the id is enough.
+        return playback_source("playlist", playlist["id"])
 
     def _update_play_buttons(self):
         if self.playback_manager is None or self.database is None:
             return GLib.SOURCE_CONTINUE
 
-        current_track = self.playback_manager.current_track
-        current_path = current_track.get("path") if current_track else None
         is_playing_state = self.playback_manager.state == "playing"
         self.grid.update_playing(
             lambda playlist: (
                     is_playing_state
-                    and current_path in self._playlist_paths.get(playlist["id"], ())
+                    and self._is_playlist_playing(playlist)
             )
         )
 
@@ -551,15 +573,62 @@ class PlaylistsView(Gtk.Box):
 
         self._update_play_buttons()
 
+    def _playlist_queue(self, playlist):
+        """The tracks of ``playlist`` in the order to play them: the order its
+        page shows them in (as sorted by the selector) while it is open,
+        otherwise by title.
+
+        The tracks carry their artwork, so the player bar can show it."""
+        if (
+                self.current_playlist is not None
+                and self.current_playlist["id"] == playlist["id"]
+                and self.stack.get_visible_child_name() == "details"
+        ):
+            return sort_tracks(
+                self.current_tracks,
+                self.sort_dropdown.get_selected(),
+            )
+
+        by_path = {track.get("path"): track for track in self.tracks}
+        tracks = self.database.get_playlist_tracks(playlist["id"])
+
+        for track in tracks:
+            cached = by_path.get(track.get("path"), {})
+            track["artwork_path"] = cached.get("artwork_path")
+            track["album_artwork_path"] = cached.get("album_artwork_path")
+
+        return sort_tracks(tracks, 0)
+
     def _play_playlist(self, playlist):
         if self.playback_manager is None:
             return
 
-        tracks = self.database.get_playlist_tracks(playlist["id"])
+        tracks = self._playlist_queue(playlist)
         if tracks:
-            self.playback_manager.play_queue(sort_tracks(tracks, 0))
+            self.playback_manager.play_queue(
+                tracks,
+                0,
+                self._playlist_source(playlist),
+            )
 
         self._update_play_buttons()
+
+    def play_page(self):
+        """Play the playlist whose page is open, like its Play button does.
+
+        False (and nothing played) when no playlist page is showing or the
+        playlist is empty.
+        """
+        if (
+                self.playback_manager is None
+                or self.current_playlist is None
+                or self.stack.get_visible_child_name() != "details"
+                or not self.current_tracks
+        ):
+            return False
+
+        self._play_playlist(self.current_playlist)
+        return True
 
     def _on_play_clicked(self, button):
         if self.current_playlist is not None:
@@ -576,7 +645,11 @@ class PlaylistsView(Gtk.Box):
 
         for index, track in enumerate(tracks):
             if track.get("id") == row.track.get("id"):
-                self.playback_manager.play_queue(tracks, index)
+                self.playback_manager.play_queue(
+                    tracks,
+                    index,
+                    self._playlist_source(self.current_playlist),
+                )
                 break
 
     def _on_delete_clicked(self, button):

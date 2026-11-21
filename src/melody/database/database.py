@@ -62,6 +62,9 @@ class Database:
                 # NULL: single track or compilation by length (see
                 # services/compilations.py). 'track' / 'compilation' forces it.
                 "kind": "TEXT",
+                # How many times the track was played (see
+                # PlaybackManager.on_play_counted).
+                "play_count": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -301,6 +304,25 @@ class Database:
 
             if cursor.rowcount == 0:
                 raise KeyError(f"Track does not exist: {track_id}")
+
+    def increment_play_count(self, track_id: str) -> int:
+        """Count one more play of a track. Returns the new count.
+
+        Library scans and edits never touch this column, so it survives both.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tracks SET play_count = play_count + 1 WHERE id = ?",
+                (track_id,),
+            )
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"Track does not exist: {track_id}")
+
+            return connection.execute(
+                "SELECT play_count FROM tracks WHERE id = ?",
+                (track_id,),
+            ).fetchone()[0]
 
     def update_track(self, track_id: str, path: Path, metadata):
         path = str(Path(path).expanduser().resolve())

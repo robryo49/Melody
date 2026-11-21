@@ -8,9 +8,15 @@ from pathlib import Path
 from gi.repository import Adw, GLib, Gtk, Pango
 
 from melody.services.collection_actions import (
-    SORT_OPTIONS,
+    ALBUM_SORT_OPTIONS,
+    album_key,
+    album_source,
     attach_track_context_menu,
-    sort_tracks,
+    is_playback_source,
+    open_artist_named,
+    playback_source,
+    reveal_track_row,
+    sort_album_tracks,
     toggle_track_playback,
     track_is_playing,
 )
@@ -23,6 +29,7 @@ from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.cover_style import install_cover_css
 from melody.widgets.import_dialogs import create_import_button
+from melody.widgets.link_label import make_link
 from melody.widgets.value_label import value_label
 
 
@@ -169,6 +176,23 @@ class ArtistsView(Gtk.Box):
             and self.stack.get_visible_child_name() == "artist"
             and current["name"].casefold() == artist["name"].casefold()
         )
+
+    def view_artist(self, track_ids, track):
+        """Show the page of the artist holding ``track_ids`` (what a queue was
+        started from) and scroll to ``track`` if it is listed there, which a
+        single or a compilation is. False if that artist is not found."""
+        artist = self._find_artist_by_tracks(set(track_ids))
+
+        if artist is None:
+            return False
+
+        self._show_artist(artist)
+
+        for list_box in (self.artist_single_list, self.artist_compilation_list):
+            if reveal_track_row(list_box, track) is not None:
+                break
+
+        return True
 
     def _build_header(self):
         header = Gtk.Box(
@@ -470,7 +494,9 @@ class ArtistsView(Gtk.Box):
 
         header.append(back_button)
         header.append(self.album_heading)
-        self.album_sort_dropdown = Gtk.DropDown.new_from_strings(SORT_OPTIONS)
+        self.album_sort_dropdown = Gtk.DropDown.new_from_strings(
+            ALBUM_SORT_OPTIONS
+        )
         self.album_sort_dropdown.set_selected(0)
         self.album_sort_dropdown.connect("notify::selected", self._on_album_sort_changed)
         self.album_page.append(header)
@@ -517,6 +543,8 @@ class ArtistsView(Gtk.Box):
         self.album_artist = value_label(
             css_classes=("title-3", "dim-label"),
         )
+        # Clicking the artist opens the artist's page.
+        make_link(self.album_artist, self._on_album_artist_link_clicked)
 
         self.album_track_count = Gtk.Label(xalign=0)
         self.album_track_count.add_css_class("dim-label")
@@ -834,6 +862,7 @@ class ArtistsView(Gtk.Box):
             play_tooltip="Play artist",
             on_edit=self._on_edit_artist_from_grid,
             open_in_menu=True,
+            artwork_kind="artist",
         )
 
         total = len(self.artists)
@@ -897,39 +926,22 @@ class ArtistsView(Gtk.Box):
         return artist["name"], " · ".join(parts), artist.get("artwork_path")
 
     def _is_artist_playing(self, artist):
-        if self.playback_manager is None:
-            return False
-
-        current_track = self.playback_manager.current_track
-        if current_track is None:
-            return False
-
-        current_path = current_track.get("path")
-        return any(
-            track.get("path") == current_path
-            for track in [
-                *(
-                    track
-                    for album in artist["albums"]
-                    for track in album["tracks"]
-                ),
-                *artist["compilations"],
-                *artist["singles"],
-            ]
+        """True when the artist is what is being played (it was started as an
+        artist), not merely one of their tracks playing."""
+        return is_playback_source(
+            self.playback_manager,
+            "artist",
+            artist["name"].casefold(),
+            lambda: self._artist_queue(artist),
         )
 
     def _is_album_playing(self, album):
-        if self.playback_manager is None:
-            return False
-
-        current_track = self.playback_manager.current_track
-        if current_track is None:
-            return False
-
-        current_path = current_track.get("path")
-        return any(
-            track.get("path") == current_path
-            for track in album["tracks"]
+        """The same, for an album (shared with the Albums page)."""
+        return is_playback_source(
+            self.playback_manager,
+            "album",
+            album_key(album),
+            album["tracks"],
         )
 
     def _update_play_buttons(self):
@@ -989,7 +1001,7 @@ class ArtistsView(Gtk.Box):
 
         self._update_play_buttons()
 
-    def _play_tracks(self, tracks, start_track=None):
+    def _play_tracks(self, tracks, start_track=None, source=None):
         if self.playback_manager is None or not tracks:
             return
 
@@ -1001,20 +1013,71 @@ class ArtistsView(Gtk.Box):
                     index = track_index
                     break
 
-        self.playback_manager.play_queue(tracks, index)
+        self.playback_manager.play_queue(tracks, index, source)
         self._update_play_buttons()
 
-    def _play_album(self, album, start_track=None):
-        self._play_tracks(album["tracks"], start_track)
+    def _album_queue(self, album):
+        """The tracks of ``album`` in the order to play them: the order its
+        page shows them in (as sorted by the selector) while it is open."""
+        if (
+                album is self.current_album
+                and self.stack.get_visible_child_name() == "album"
+        ):
+            return sort_album_tracks(
+                album["tracks"],
+                self.album_sort_dropdown.get_selected(),
+            )
 
-    def _play_artist(self, artist):
-        # The albums' tracks, then the singles.
-        tracks = [
+        return album["tracks"]
+
+    def _play_album(self, album, start_track=None):
+        self._play_tracks(
+            self._album_queue(album),
+            start_track,
+            album_source(album),
+        )
+
+    @staticmethod
+    def _artist_queue(artist):
+        """What the artist's Play button plays: the albums' tracks, then the
+        singles."""
+        return [
             track
             for album in artist["albums"]
             for track in album["tracks"]
         ] + artist["singles"]
-        self._play_tracks(tracks)
+
+    def _artist_source(self, artist, tracks=None):
+        return playback_source(
+            "artist",
+            artist["name"].casefold(),
+            self._artist_queue(artist) if tracks is None else tracks,
+        )
+
+    def _play_artist(self, artist):
+        tracks = self._artist_queue(artist)
+        self._play_tracks(tracks, None, self._artist_source(artist, tracks))
+
+    def play_page(self):
+        """Play the album or artist whose page is open, like its Play button
+        does. False (and nothing played) on any other page."""
+        if self.playback_manager is None:
+            return False
+
+        page = self.stack.get_visible_child_name()
+
+        if page == "album" and self.current_album is not None:
+            self._play_album(self.current_album)
+            return True
+
+        if page == "artist" and self.current_artist is not None:
+            if not self._artist_queue(self.current_artist):
+                return False
+
+            self._play_artist(self.current_artist)
+            return True
+
+        return False
 
     def _on_artist_play_clicked(self, button):
         if self.current_artist is not None:
@@ -1025,12 +1088,30 @@ class ArtistsView(Gtk.Box):
             self._toggle_album(self.current_album)
 
     def _on_compilation_activated(self, list_box, row):
+        # Not the artist's Play list (it leaves the compilations out), so
+        # the artist does not count as playing.
         if self.current_artist is not None:
-            self._play_tracks(self.current_artist["compilations"], row.track)
+            compilations = self.current_artist["compilations"]
+            self._play_tracks(
+                compilations,
+                row.track,
+                playback_source(
+                    "artist-compilations",
+                    self.current_artist["name"].casefold(),
+                    compilations,
+                ),
+            )
 
     def _on_single_activated(self, list_box, row):
+        # Like the artist's Play button, but starting from the single that
+        # was clicked.
         if self.current_artist is not None:
-            self._play_tracks(self.current_artist["singles"], row.track)
+            tracks = self._artist_queue(self.current_artist)
+            self._play_tracks(
+                tracks,
+                row.track,
+                self._artist_source(self.current_artist, tracks),
+            )
 
     def _on_album_track_activated(self, list_box, row):
         if self.current_album is not None:
@@ -1307,22 +1388,31 @@ class ArtistsView(Gtk.Box):
         return row
 
     def _toggle_track(self, track):
+        source = None
+
         if self.current_album:
-            queue = self.current_album["tracks"]
+            queue = self._album_queue(self.current_album)
+            source = album_source(self.current_album)
         elif self.current_artist and any(
                 candidate.get("id") == track.get("id")
                 for candidate in self.current_artist["compilations"]
         ):
             queue = self.current_artist["compilations"]
+            source = playback_source(
+                "artist-compilations",
+                self.current_artist["name"].casefold(),
+                queue,
+            )
         elif self.current_artist and any(
                 candidate.get("id") == track.get("id")
                 for candidate in self.current_artist["singles"]
         ):
-            queue = self.current_artist["singles"]
+            queue = self._artist_queue(self.current_artist)
+            source = self._artist_source(self.current_artist, queue)
         else:
             queue = [track]
 
-        toggle_track_playback(self.playback_manager, track, queue)
+        toggle_track_playback(self.playback_manager, track, queue, source)
         self._update_play_buttons()
 
     def _refresh_album_track_list(self):
@@ -1333,7 +1423,7 @@ class ArtistsView(Gtk.Box):
             child = nxt
         if self.current_album is None:
             return
-        for track in sort_tracks(self.current_album["tracks"], self.album_sort_dropdown.get_selected()):
+        for track in sort_album_tracks(self.current_album["tracks"], self.album_sort_dropdown.get_selected()):
             self.album_track_list.append(self._create_track_row(track))
 
     def _on_album_sort_changed(self, dropdown, pspec):
@@ -1355,6 +1445,10 @@ class ArtistsView(Gtk.Box):
                 "artist": self.current_album["artist"],
                 "album": self.current_album["title"],
             })
+
+    def _on_album_artist_link_clicked(self):
+        if self.current_album is not None:
+            open_artist_named(self.current_album["artist"])
 
     def _on_edit_artist_album_clicked(self):
         if self.current_album is not None and self.on_rename_album is not None:

@@ -8,6 +8,42 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk
 
 
+_PREVIEW_CSS = """
+.player-preview {
+    padding: 2px 6px;
+    border-radius: 8px;
+}
+.player-preview.has-track:hover {
+    background-color: alpha(currentColor, 0.07);
+}
+.player-preview.has-track.pressed {
+    background-color: alpha(currentColor, 0.12);
+}
+"""
+_preview_css_installed = False
+
+
+def _install_preview_css():
+    global _preview_css_installed
+
+    if _preview_css_installed:
+        return
+
+    display = Gdk.Display.get_default()
+
+    if display is None:
+        return
+
+    provider = Gtk.CssProvider()
+    provider.load_from_string(_PREVIEW_CSS)
+    Gtk.StyleContext.add_provider_for_display(
+        display,
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
+    _preview_css_installed = True
+
+
 class SeekBar(Gtk.DrawingArea):
     def __init__(self, playback_manager):
         super().__init__()
@@ -186,7 +222,19 @@ class PlayerBar(Gtk.Box):
         # no cover is smaller than a cover (about 70%).
         self.artwork.set_pixel_size(self.NOTE_SIZE)
         self.artwork.set_size_request(48, 48)
-        self.append(self.artwork)
+
+        # The cover and the title and artist: right-clicking them opens the
+        # track's menu (the window attaches it to ``preview``), and double
+        # clicking them calls ``on_view`` (what "View" in that menu does).
+        self.on_view = None
+
+        _install_preview_css()
+        self.preview = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=16,
+        )
+        self.preview.add_css_class("player-preview")
+        self.preview.append(self.artwork)
 
         track_info = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -205,7 +253,15 @@ class PlayerBar(Gtk.Box):
 
         track_info.append(self.title_label)
         track_info.append(self.artist_label)
-        self.append(track_info)
+        self.preview.append(track_info)
+        self.append(self.preview)
+
+        preview_click = Gtk.GestureClick.new()
+        preview_click.set_button(Gdk.BUTTON_PRIMARY)
+        preview_click.connect("pressed", self._on_preview_pressed)
+        preview_click.connect("released", self._on_preview_released)
+        preview_click.connect("stopped", self._on_preview_released)
+        self.preview.add_controller(preview_click)
 
         progress_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -304,8 +360,21 @@ class PlayerBar(Gtk.Box):
 
         self.playback_manager.toggle_playback()
 
+    def _on_preview_pressed(self, gesture, n_press, x, y):
+        # Lighter while the button is held, like a track row.
+        self.preview.add_css_class("pressed")
+
+        track = self.playback_manager.current_track
+
+        if n_press == 2 and track is not None and self.on_view is not None:
+            self.on_view(track)
+
+    def _on_preview_released(self, *_args):
+        self.preview.remove_css_class("pressed")
+
     def set_track(self, track):
         if track is None:
+            self.preview.remove_css_class("has-track")
             self.title_label.set_text("Nothing playing")
             self.artist_label.set_text("")
             self.artwork.set_from_icon_name("audio-x-generic-symbolic")
@@ -317,6 +386,18 @@ class PlayerBar(Gtk.Box):
             self.duration_label.set_text("0:00")
             return
 
+        self._show_track_info(track)
+        self.preview.add_css_class("has-track")
+        self.progress.set_sensitive(True)
+        self._update_progress()
+
+    def refresh_track(self, track):
+        """The track being played was edited: show its new title, artist and
+        artwork. Unlike ``set_track`` this leaves the progress alone, since the
+        track keeps playing."""
+        self._show_track_info(track)
+
+    def _show_track_info(self, track):
         self.title_label.set_text(
             track.get("title") or Path(track["path"]).stem
         )
@@ -324,17 +405,15 @@ class PlayerBar(Gtk.Box):
             track.get("artist") or "Unknown Artist"
         )
 
-        artwork_path = track.get("album_artwork_path")
+        # The track's own artwork, not the album's.
+        artwork_path = track.get("artwork_path")
 
         if artwork_path and Path(artwork_path).is_file():
-            self.artwork.set_from_file(artwork_path)
+            self.artwork.set_from_file(str(artwork_path))
             self.artwork.set_pixel_size(self.COVER_SIZE)
         else:
             self.artwork.set_from_icon_name("audio-x-generic-symbolic")
             self.artwork.set_pixel_size(self.NOTE_SIZE)
-
-        self.progress.set_sensitive(True)
-        self._update_progress()
 
     def sync_options(self):
         """Show the repeat and shuffle modes the player is really in: they

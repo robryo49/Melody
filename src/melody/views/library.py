@@ -14,9 +14,16 @@ from melody.services.track_range import track_length
 from melody.layout import PAGE_MARGIN, SEARCH_WIDTH, style_header_controls
 from melody.services.collection_actions import (
     attach_track_context_menu,
+    is_playback_source,
+    open_track_album,
+    open_track_artist,
+    playback_source,
+    scroll_to_row,
+    show_in_file_manager,
     toggle_track_playback,
     track_is_playing,
 )
+from melody.widgets.link_label import make_link
 
 
 class LibraryView(Gtk.Box):
@@ -50,6 +57,9 @@ class LibraryView(Gtk.Box):
         self._track_filter = track_filter
 
         self.tracks = []
+        # What the list shows right now, filtered and in its sort order: the
+        # queue that every way of playing from this page uses.
+        self._displayed_tracks = []
         self.playback_manager = None
         self._artwork_request_id = 0
         self._edit_track = None
@@ -83,6 +93,43 @@ class LibraryView(Gtk.Box):
 
         self.append(self.stack)
         self._update_view()
+
+    @property
+    def title(self):
+        return self._title
+
+    def show_track(self, track):
+        """Select ``track`` in the list and scroll to it. A search that hides
+        it is cleared first."""
+        track_id = track.get("id")
+        delay = 80
+
+        shown = any(
+            candidate.get("id") == track_id
+            for candidate in self._displayed_tracks
+        )
+
+        if not shown and self.search_entry.get_text():
+            self.search_entry.set_text("")
+            self._refresh_list()
+            # The search entry reports its change a moment later, which
+            # rebuilds the list once more: wait for that before scrolling.
+            delay = 400
+
+        GLib.timeout_add(delay, self._select_and_scroll, track_id)
+
+    def _select_and_scroll(self, track_id):
+        child = self.track_list.get_first_child()
+
+        while child is not None:
+            if child.track.get("id") == track_id:
+                self.track_list.select_row(child)
+                scroll_to_row(child)
+                break
+
+            child = child.get_next_sibling()
+
+        return GLib.SOURCE_REMOVE
 
     def set_playback_manager(self, playback_manager):
         self.playback_manager = playback_manager
@@ -128,11 +175,21 @@ class LibraryView(Gtk.Box):
         self.import_button.set_tooltip_text("Import music into your library")
         self.import_button.set_visible(False)
 
+        # Plays the list below, in the order it is sorted.
+        self.play_all_button = Gtk.Button(label="Play")
+        self.play_all_button.set_tooltip_text("Play the list below")
+        self.play_all_button.set_sensitive(False)
+        self.play_all_button.connect(
+            "clicked",
+            self._on_play_all_clicked,
+        )
+
         self.sort_dropdown = Gtk.DropDown.new_from_strings([
             "Title",
             "Album",
             "Artist",
             "Duration",
+            "Play Count",
         ])
         self.sort_dropdown.set_selected(0)
         self.sort_dropdown.connect(
@@ -150,6 +207,7 @@ class LibraryView(Gtk.Box):
 
         header.append(title)
         header.append(self.count_label)
+        header.append(self.play_all_button)
         header.append(self.import_button)
         header.append(self.sort_dropdown)
         header.append(self.search_entry)
@@ -251,14 +309,29 @@ class LibraryView(Gtk.Box):
         self.details_artist = self._create_detail_label()
         self.details_album = self._create_detail_label()
         self.details_duration = self._create_detail_label()
+        self.details_plays = self._create_detail_label()
+
+        # The artist, the album and the path are links: they open the
+        # artist's page, the album's page and the folder of the file. Only
+        # their text reacts, so they are not stretched across the panel.
+        for label, callback in (
+            (self.details_artist, self._on_artist_link_clicked),
+            (self.details_album, self._on_album_link_clicked),
+        ):
+            label.set_halign(Gtk.Align.START)
+            label.set_size_request(-1, -1)
+            make_link(label, callback)
 
         self.details_panel.append(self.details_artist)
         self.details_panel.append(self.details_album)
         self.details_panel.append(self.details_duration)
+        self.details_panel.append(self.details_plays)
 
         self.details_path = self._create_detail_label()
-        self.details_path.set_selectable(True)
+        self.details_path.set_halign(Gtk.Align.START)
+        self.details_path.set_size_request(-1, -1)
         self.details_path.add_css_class("caption")
+        make_link(self.details_path, self._on_path_link_clicked)
         self.details_panel.append(self.details_path)
 
         details_fixed.put(
@@ -321,7 +394,58 @@ class LibraryView(Gtk.Box):
         playing = has_track and track_is_playing(self.playback_manager, track)
         self.play_button.set_label("Pause" if playing else "Play")
 
+        self.play_all_button.set_sensitive(bool(self._displayed_tracks))
+        self.play_all_button.set_label(
+            "Pause"
+            if (
+                self.playback_manager is not None
+                and self.playback_manager.state == "playing"
+                and self._is_list_current()
+            )
+            else "Play"
+        )
+
         return GLib.SOURCE_CONTINUE
+
+    def _is_list_current(self):
+        """True when the list is what is being played: it was started from
+        this page, not merely a track of it playing."""
+        return is_playback_source(
+            self.playback_manager,
+            "list",
+            self._title,
+        )
+
+    def _list_source(self):
+        return playback_source("list", self._title, self._displayed_tracks)
+
+    def _on_play_all_clicked(self, button):
+        manager = self.playback_manager
+
+        if manager is None or not self._displayed_tracks:
+            return
+
+        if self._is_list_current():
+            manager.toggle_playback()
+        else:
+            manager.play_queue(self._displayed_tracks, 0, self._list_source())
+
+        self._update_action_buttons()
+
+    def play_page(self):
+        """Play the list from its first track, as the Play button does.
+
+        False (and nothing played) when the list is empty.
+        """
+        if self.playback_manager is None or not self._displayed_tracks:
+            return False
+
+        self.playback_manager.play_queue(
+            self._displayed_tracks,
+            0,
+            self._list_source(),
+        )
+        return True
 
     def _on_play_button_clicked(self, button):
         track = self._selected_track()
@@ -329,6 +453,24 @@ class LibraryView(Gtk.Box):
         if track is not None:
             self._toggle_track(track)
             self._update_action_buttons()
+
+    def _on_artist_link_clicked(self):
+        track = self._selected_track()
+
+        if track is not None:
+            open_track_artist(track)
+
+    def _on_album_link_clicked(self):
+        track = self._selected_track()
+
+        if track is not None:
+            open_track_album(track)
+
+    def _on_path_link_clicked(self):
+        track = self._selected_track()
+
+        if track is not None and track.get("path"):
+            show_in_file_manager(self.get_root(), track["path"])
 
     def _on_edit_button_clicked(self, button):
         track = self._selected_track()
@@ -438,19 +580,25 @@ class LibraryView(Gtk.Box):
         toggle_track_playback(
             self.playback_manager,
             track,
-            self._get_sorted_tracks(self.tracks),
+            self._displayed_tracks,
+            self._list_source(),
         )
 
     def _on_track_activated(self, list_box, row):
-        if self.playback_manager is None or not self.tracks:
+        if self.playback_manager is None or not self._displayed_tracks:
             return
 
+        # Like the Play button, but starting from the track that was clicked.
         selected_track = row.track
-        queue = self._get_sorted_tracks(self.tracks)
+        queue = self._displayed_tracks
 
         for index, track in enumerate(queue):
             if track.get("path") == selected_track.get("path"):
-                self.playback_manager.play_queue(queue, index)
+                self.playback_manager.play_queue(
+                    queue,
+                    index,
+                    self._list_source(),
+                )
                 return
 
     def play_selected(self):
@@ -490,6 +638,7 @@ class LibraryView(Gtk.Box):
             self._format_duration(track_length(track))
         )
         self.details_path.set_text(track_path)
+        self.details_plays.set_text(self._plays_text(track))
         self._update_action_buttons()
 
         self.artwork_stack.set_visible_child_name("placeholder")
@@ -542,6 +691,7 @@ class LibraryView(Gtk.Box):
         self.details_artist.set_text("")
         self.details_album.set_text("")
         self.details_duration.set_text("")
+        self.details_plays.set_text("")
         self.details_path.set_text("")
         self._update_action_buttons()
 
@@ -556,10 +706,37 @@ class LibraryView(Gtk.Box):
 
         return f"{minutes}:{seconds:02}"
 
+    @staticmethod
+    def _plays_text(track):
+        count = int(track.get("play_count") or 0)
+
+        if count == 0:
+            return "Never played"
+
+        return f"Played {count} time{'s' if count != 1 else ''}"
+
+    def refresh_play_count(self):
+        """A track was played once more: update the count shown for the
+        selected track."""
+        track = self._selected_track()
+
+        if track is not None:
+            self.details_plays.set_text(self._plays_text(track))
+
     def _get_sorted_tracks(self, tracks):
         sort_index = self.sort_dropdown.get_selected()
-        fields = ("title", "album", "artist", "duration")
+        fields = ("title", "album", "artist", "duration", "play_count")
         field = fields[sort_index]
+
+        if field == "play_count":
+            # Most played first, then by title.
+            return sorted(
+                tracks,
+                key=lambda track: (
+                    -(track.get("play_count") or 0),
+                    str(track.get("title") or "").casefold(),
+                ),
+            )
 
         if field == "duration":
             return sorted(
@@ -603,6 +780,7 @@ class LibraryView(Gtk.Box):
         visible_tracks = self._get_sorted_tracks(
             self._get_filtered_tracks()
         )
+        self._displayed_tracks = visible_tracks
 
         selected_row = None
 

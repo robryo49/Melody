@@ -8,9 +8,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 
-from gi.repository import Adw, Gdk, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
-from melody.services.artwork import get_cached_own_artwork
+from melody.services.artwork import get_cached_own_artwork, image_as_png
 from melody.services.compilations import (
     automatic_is_compilation,
     format_clock,
@@ -30,7 +30,20 @@ from melody.widgets.image_picker import show_image_picker, texture_from_bytes
 from melody.widgets.range_selector import TimeRangeSelector
 
 
-SORT_OPTIONS = ["Title", "Album", "Artist", "Duration"]
+SORT_OPTIONS = ["Title", "Album", "Artist", "Duration", "Play Count"]
+
+# An album page has no use for sorting by album or artist (they are all the
+# same there): it only offers these, whose positions map to ``SORT_OPTIONS``'.
+ALBUM_SORT_OPTIONS = ["Title", "Duration", "Play Count"]
+_ALBUM_SORT_INDEXES = (0, 3, 4)
+
+
+def sort_album_tracks(tracks, selected_index):
+    """``sort_tracks`` for the ``ALBUM_SORT_OPTIONS`` selector."""
+    if selected_index not in range(len(_ALBUM_SORT_INDEXES)):
+        selected_index = 0
+
+    return sort_tracks(tracks, _ALBUM_SORT_INDEXES[selected_index])
 
 
 def sort_tracks(tracks, selected_index):
@@ -39,6 +52,11 @@ def sort_tracks(tracks, selected_index):
         1: lambda track: str(track.get("album") or "").casefold(),
         2: lambda track: str(track.get("artist") or "").casefold(),
         3: lambda track: track_length(track),
+        # Most played first.
+        4: lambda track: (
+            -(track.get("play_count") or 0),
+            str(track.get("title") or "").casefold(),
+        ),
     }
     return sorted(tracks, key=keys.get(selected_index, keys[0]))
 
@@ -103,6 +121,66 @@ def show_error_dialog(parent, heading, message):
     dialog.present()
 
 
+def scroll_to_row(row, attempts=15):
+    """Scroll the page ``row`` is on so that the row sits in the middle of the
+    view.
+
+    The row may be on a page that was only just shown, and so not laid out
+    yet: this waits for that (a few tries, a moment apart) before moving.
+    """
+    remaining = [attempts]
+
+    def attempt():
+        scrolled = row.get_ancestor(Gtk.ScrolledWindow)
+
+        if scrolled is None:
+            return GLib.SOURCE_REMOVE
+
+        content = scrolled.get_child()
+
+        if isinstance(content, Gtk.Viewport):
+            content = content.get_child()
+
+        adjustment = scrolled.get_vadjustment()
+        page = adjustment.get_page_size()
+        found, bounds = row.compute_bounds(content)
+
+        if not found or row.get_height() <= 0 or page <= 0:
+            remaining[0] -= 1
+            return (
+                GLib.SOURCE_CONTINUE
+                if remaining[0] > 0
+                else GLib.SOURCE_REMOVE
+            )
+
+        target = bounds.get_y() - (page - bounds.get_height()) / 2
+        top = adjustment.get_lower()
+        bottom = max(top, adjustment.get_upper() - page)
+        adjustment.set_value(max(top, min(target, bottom)))
+
+        return GLib.SOURCE_REMOVE
+
+    GLib.timeout_add(60, attempt)
+
+
+def reveal_track_row(list_box, track):
+    """Scroll to ``track``'s row in ``list_box`` (rows carry their track as
+    ``row.track``). Returns the row, or None if the list does not have it."""
+    track_id = track.get("id")
+    child = list_box.get_first_child()
+
+    while child is not None:
+        row_track = getattr(child, "track", None)
+
+        if row_track is not None and row_track.get("id") == track_id:
+            scroll_to_row(child)
+            return child
+
+        child = child.get_next_sibling()
+
+    return None
+
+
 # ----------------------------------------------------------------------
 # Playback helpers shared by the track context menus
 # ----------------------------------------------------------------------
@@ -121,8 +199,11 @@ def track_is_playing(playback_manager, track):
     )
 
 
-def toggle_track_playback(playback_manager, track, queue):
-    """Pause/resume ``track`` if it is current, otherwise play it from ``queue``."""
+def toggle_track_playback(playback_manager, track, queue, source=None):
+    """Pause/resume ``track`` if it is current, otherwise play it from ``queue``.
+
+    ``source`` says what the queue is (see ``playback_source``).
+    """
     if playback_manager is None:
         return
 
@@ -132,10 +213,167 @@ def toggle_track_playback(playback_manager, track, queue):
 
     for index, candidate in enumerate(queue):
         if candidate.get("path") == track.get("path"):
-            playback_manager.play_queue(queue, index)
+            playback_manager.play_queue(queue, index, source)
             return
 
     playback_manager.play_track(track)
+
+
+# ----------------------------------------------------------------------
+# What is being played
+# ----------------------------------------------------------------------
+#
+# An album, an artist, a playlist, the Library... only counts as playing when
+# it is what the queue was started from, not just because one of its tracks
+# happens to be playing. The player remembers that as its ``source``.
+
+def playback_source(kind, key, tracks=()):
+    """Describe what a queue was started from.
+
+    ``kind`` is "album", "artist", "playlist", "list" (the Library and the
+    Compilations page)... and ``key`` identifies it among those of its kind.
+    The ids of ``tracks`` let it be recognised after an edit renamed it.
+    """
+    return {
+        "kind": kind,
+        "key": key,
+        "ids": frozenset(track.get("id") for track in tracks),
+    }
+
+
+def album_key(album):
+    """What identifies an album, whichever page it is shown on."""
+    return (album["artist"].casefold(), album["title"].casefold())
+
+
+def album_source(album):
+    return playback_source("album", album_key(album), album["tracks"])
+
+
+def is_playback_source(playback_manager, kind, key, tracks=()):
+    """True when the queue being played was started from this album, artist,
+    playlist... (``tracks`` are its tracks now).
+
+    It is the same one by its key, or, when an edit renamed it since, because
+    most of the tracks it was started with are the ones it holds now.
+    """
+    source = playback_manager.source if playback_manager else None
+
+    if source is None or source["kind"] != kind:
+        return False
+
+    if source["key"] == key:
+        return True
+
+    # ``tracks`` may be a function, so they are only worked out when needed.
+    if callable(tracks):
+        tracks = tracks()
+
+    ids = {track.get("id") for track in tracks}
+
+    return len(source["ids"] & ids) * 2 > len(source["ids"])
+
+
+# ----------------------------------------------------------------------
+# Copying and pasting artwork
+# ----------------------------------------------------------------------
+
+_CLIPBOARD_IMAGE_TYPES = (
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+    "image/gif",
+)
+
+
+def _clipboard():
+    return Gdk.Display.get_default().get_clipboard()
+
+
+def copy_image_to_clipboard(data):
+    """Put the image ``data`` (any format Pillow reads) on the clipboard, at
+    its full size. Raises if it is not an image."""
+    texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(image_as_png(data)))
+
+    # Declared as a plain Gdk.Texture: the instance's own type is a private
+    # subclass, which the clipboard would then advertise instead.
+    value = GObject.Value(Gdk.Texture, texture)
+    _clipboard().set_content(Gdk.ContentProvider.new_for_value(value))
+
+
+def clipboard_has_image():
+    """True when the clipboard holds an image (not just text or files)."""
+    formats = _clipboard().get_formats()
+    texture_type = Gdk.Texture.__gtype__
+
+    if formats.contain_gtype(texture_type):
+        return True
+
+    # An image Melody put there itself may be advertised under a subclass of
+    # Gdk.Texture, which contain_gtype does not match.
+    try:
+        gtypes = formats.get_gtypes()
+
+        if isinstance(gtypes, tuple):
+            gtypes = gtypes[0]
+
+        if gtypes and any(gtype.is_a(texture_type) for gtype in gtypes):
+            return True
+    except Exception:
+        pass
+
+    return any(
+        formats.contain_mime_type(mime_type)
+        for mime_type in _CLIPBOARD_IMAGE_TYPES
+    )
+
+
+def read_clipboard_image(callback):
+    """Read the image on the clipboard and call ``callback(png_bytes)`` with
+    it, or ``callback(None)`` when it could not be read."""
+    def done(clipboard, result):
+        try:
+            texture = clipboard.read_texture_finish(result)
+            data = texture.save_to_png_bytes().get_data() if texture else None
+        except Exception:
+            data = None
+
+        callback(data)
+
+    _clipboard().read_texture_async(None, done)
+
+
+# What a track's, album's, artist's or playlist's "Copy artwork" and "Paste
+# artwork" do, registered once by the window for every menu (like the
+# navigation further down). Each kind has a ``copy(item)`` and a
+# ``paste(item)``.
+_artwork_actions = {}
+
+
+def set_artwork_actions(kind, copy, paste):
+    """Register the copy and paste of ``kind``: "track", "album", "artist"
+    or "playlist"."""
+    _artwork_actions[kind] = (copy, paste)
+
+
+def artwork_menu_entries(kind):
+    """The ``(label, action)`` pairs a menu gets for ``kind``: always "Copy",
+    and "Paste" too while the clipboard holds an image. ``action(item)``."""
+    actions = _artwork_actions.get(kind)
+
+    if actions is None:
+        return []
+
+    copy, paste = actions
+    noun = "image" if kind == "artist" else "artwork"
+    entries = [(f"Copy {noun}", copy)]
+
+    if clipboard_has_image():
+        entries.append((f"Paste {noun}", paste))
+
+    return entries
 
 
 # ----------------------------------------------------------------------
@@ -567,6 +805,7 @@ def show_edit_dialog(
         compilation_spec=None,
         allow_unchanged=False,
         round_cover=False,
+        info=None,
 ):
     """Open a window with a cover on the left and editable fields on the right.
 
@@ -603,6 +842,9 @@ def show_edit_dialog(
 
     With ``round_cover`` the cover is shown as a circle (an artist's
     picture).
+
+    ``info`` is a list of ``(caption, value)`` pairs shown under the fields,
+    for information that cannot be edited (the play count, say).
 
     Normally Save stays disabled until something has changed. With
     ``allow_unchanged`` it is enabled as soon as the fields are valid (for a
@@ -650,7 +892,8 @@ def show_edit_dialog(
         cover_size,
         len(specs) * 86 - 16
         + (44 if compilation_spec else 0)
-        + (60 if hint else 0),
+        + (60 if hint else 0)
+        + 44 * len(info or ()),
     )
 
     cover = Gtk.Picture()
@@ -814,6 +1057,21 @@ def show_edit_dialog(
     right.set_hexpand(False)
     right.set_vexpand(False)
     right.append(form)
+
+    # Read-only information, laid out like a field but not editable.
+    for caption_text, value_text in info or ():
+        info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+
+        caption = Gtk.Label(label=caption_text, xalign=0)
+        caption.add_css_class("caption-heading")
+
+        value = Gtk.Label(label=value_text, xalign=0)
+        value.add_css_class("dim-label")
+
+        info_box.append(caption)
+        info_box.append(value)
+        right.append(info_box)
+
     if hint:
         right.append(hint_label)
 
@@ -1103,6 +1361,13 @@ def show_edit_track_dialog(
             ),
         }
 
+    # How many times the track was played: shown for information only (a
+    # track being imported has no count yet).
+    info = None
+
+    if track.get("play_count") is not None:
+        info = [("Play count", str(int(track["play_count"])))]
+
     show_edit_dialog(
         parent,
         window_title,
@@ -1114,6 +1379,7 @@ def show_edit_track_dialog(
         range_spec=range_spec,
         compilation_spec=compilation_spec,
         allow_unchanged=allow_unchanged,
+        info=info,
     )
 
 
@@ -1404,6 +1670,52 @@ def open_artist_named(name):
         open_artist({"artist": name})
 
 
+def open_track_album(track):
+    """Open the page of ``track``'s album (nothing for a single)."""
+    open_album = _track_navigation["open_album"]
+
+    if open_album is not None and has_album(track):
+        open_album(track)
+
+
+def open_track_artist(track):
+    """Open the page of ``track``'s artist."""
+    open_artist = _track_navigation["open_artist"]
+
+    if open_artist is not None:
+        open_artist(track)
+
+
+def show_in_file_manager(parent, path):
+    """Open the folder holding ``path`` in the file manager, with the file
+    selected where the file manager supports it."""
+    launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(str(path)))
+
+    def done(launcher, result):
+        try:
+            launcher.open_containing_folder_finish(result)
+        except GLib.Error as error:
+            # Closing the file manager's window without choosing is not an
+            # error worth a dialog.
+            if not error.matches(Gtk.dialog_error_quark(), Gtk.DialogError.DISMISSED):
+                show_error_dialog(parent, "Could not open the folder", error.message)
+
+    launcher.open_containing_folder(parent, None, done)
+
+
+# "Play after" / "Add to queue" in a track's menu, registered once by the
+# window like the navigation above.
+_track_queue = {"play_after": None, "add_to_queue": None}
+
+
+def set_track_queue_actions(play_after, add_to_queue):
+    """Register what the track menus' "Play after" and "Add to queue" do.
+
+    Both receive the track.
+    """
+    _track_queue.update(play_after=play_after, add_to_queue=add_to_queue)
+
+
 # "Delete" in a track's menu removes the track from the whole library, so,
 # like the navigation above, the window registers it once for every menu.
 _track_deletion = {"delete": None}
@@ -1426,8 +1738,15 @@ def attach_track_context_menu(
         on_edit,
         on_add_to_playlist,
         on_remove_from_playlist=None,
+        on_view=None,
+        position=Gtk.PositionType.BOTTOM,
 ):
     """Right-click menu for a track row.
+
+    ``track`` may also be a function returning the track (or None, for no
+    menu), for a widget whose track changes, like the player bar's.
+    With ``on_view``, a "View" entry (next to "Open album" and "Open artist")
+    calls it with the track.
 
     Every action is a flat menu entry; anything needing more input (editing,
     choosing a playlist) opens its own window instead of a sub-menu.
@@ -1437,7 +1756,15 @@ def attach_track_context_menu(
     gesture = Gtk.GestureClick.new()
     gesture.set_button(3)
 
+    def current_track():
+        return track() if callable(track) else track
+
     def on_pressed(gesture, press_count, x, y):
+        track = current_track()
+
+        if track is None:
+            return
+
         # Right-clicking a track selects it at once. The list only selects a
         # row when the click is released, which for a right click is after the
         # menu has closed.
@@ -1452,7 +1779,7 @@ def attach_track_context_menu(
         # corner at the pointer.
         popover.set_has_arrow(False)
         popover.set_halign(Gtk.Align.START)
-        popover.set_position(Gtk.PositionType.BOTTOM)
+        popover.set_position(position)
 
         menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -1471,6 +1798,13 @@ def attach_track_context_menu(
             menu.append(button)
 
         add_item("Pause" if is_playing(track) else "Play", on_play_pause)
+
+        if _track_queue["play_after"] is not None:
+            add_item("Play after", _track_queue["play_after"])
+
+        if _track_queue["add_to_queue"] is not None:
+            add_item("Add to queue", _track_queue["add_to_queue"])
+
         menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         navigation = _track_navigation
@@ -1482,6 +1816,12 @@ def attach_track_context_menu(
             add_item("Open album", navigation["open_album"])
         if navigation["open_artist"] is not None and not navigation["artist_is_open"](track):
             add_item("Open artist", navigation["open_artist"])
+
+        if on_view is not None:
+            add_item("View", on_view)
+
+        for label, action in artwork_menu_entries("track"):
+            add_item(label, action)
 
         add_item("Edit…", on_edit)
 

@@ -20,16 +20,27 @@ from melody.services.collection_actions import (
     show_text_dialog,
     set_track_navigation,
     set_track_deletion,
+    set_track_queue_actions,
+    set_artwork_actions,
+    attach_track_context_menu,
+    track_is_playing,
+    copy_image_to_clipboard,
+    read_clipboard_image,
 )
 from melody.services.artwork import (
     get_album_artwork_bytes,
     get_cached_album_artwork,
     get_cached_artwork,
     get_local_artist_artwork,
+    get_local_artist_artwork_bytes,
+    get_track_artwork_bytes,
 )
 from melody.services.library_scanner import _sanitize_name
 from melody.services.image_sources import album_sources, artist_sources
-from melody.services.playlist_artwork import set_playlist_cover
+from melody.services.playlist_artwork import (
+    get_playlist_cover,
+    set_playlist_cover,
+)
 from melody.services.playback_manager import PlaybackManager
 from melody.services.mpris import MprisService
 from melody.views import (
@@ -117,6 +128,25 @@ class MelodyWindow(Adw.ApplicationWindow):
         for name in ("Albums", "Artists", "Playlists"):
             self.views[name].set_import_callback(self._import_music)
         set_track_deletion(self._delete_track)
+        set_track_queue_actions(
+            self.playback_manager.play_after_current,
+            self.playback_manager.add_to_queue,
+        )
+        # "Copy artwork" / "Paste artwork" in the right-click menus.
+        set_artwork_actions(
+            "track", self._copy_track_artwork, self._paste_track_artwork,
+        )
+        set_artwork_actions(
+            "album", self._copy_album_artwork, self._paste_album_artwork,
+        )
+        set_artwork_actions(
+            "artist", self._copy_artist_image, self._paste_artist_image,
+        )
+        set_artwork_actions(
+            "playlist",
+            self._copy_playlist_artwork,
+            self._paste_playlist_artwork,
+        )
         self.views["Albums"].set_rename_callbacks(
             self._edit_album,
             self._edit_album,
@@ -293,7 +323,24 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.player_bar.update_playback_state
         )
         self.playback_manager.on_error = self._on_playback_error
+        self.playback_manager.on_play_counted = self._on_play_counted
         self.player_bar.on_play_idle = self._play_selected_track
+        self.player_bar.on_view = self._view_track_source
+
+        # Right-clicking the track shown in the bar opens the same menu as on
+        # the track itself, plus "View": the page it was played from.
+        attach_track_context_menu(
+            self.player_bar.preview,
+            lambda: self.playback_manager.current_track,
+            on_play_pause=lambda _track: self.playback_manager.toggle_playback(),
+            is_playing=lambda track: track_is_playing(
+                self.playback_manager, track,
+            ),
+            on_edit=self._edit_track,
+            on_add_to_playlist=self._choose_playlist_for_track,
+            on_view=self._view_track_source,
+            position=Gtk.PositionType.TOP,
+        )
 
         # Media keys, the shell's media widget and playerctl can see and
         # control the player.
@@ -317,6 +364,24 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self.content_toolbar.set_content(layout)
         return Adw.NavigationPage.new(self.content_toolbar, "Content")
+
+    def _on_play_counted(self, track):
+        """A track has been listened to long enough: count one more play."""
+        try:
+            count = self.database.increment_play_count(track["id"])
+        except Exception:
+            return
+
+        # The queue may hold its own copy of the track (a playlist's), so the
+        # library's copy is updated too.
+        track["play_count"] = count
+
+        for candidate in self.tracks:
+            if candidate.get("id") == track.get("id"):
+                candidate["play_count"] = count
+
+        for name in ("Library", "Compilations"):
+            self.views[name].refresh_play_count()
 
     def _show_preferences(self):
         show_preferences_dialog(self, self.settings, self._rescan_library)
@@ -463,7 +528,8 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _on_sync_finished(self, report, tracks):
         self.tracks = tracks
-        self.playback_manager.set_queue(tracks)
+        self.playback_manager.refresh_tracks(tracks)
+        self._refresh_player_bar()
 
         self.views["Library"].set_tracks(tracks)
         self.views["Compilations"].set_tracks(tracks)
@@ -548,6 +614,53 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.content_stack.get_visible_child_name() == "artists"
             and self.views["Artists"].is_artist_open(track)
         )
+
+    # ------------------------------------------------------------------
+    # "View" in the player bar's track menu
+    # ------------------------------------------------------------------
+
+    def _view_track_source(self, track):
+        """Show the page the playing queue was started from (a playlist, an
+        album, an artist, the Library or the Compilations page) and scroll to
+        the track there when that page lists it."""
+        source = self.playback_manager.source
+        kind = source["kind"] if source else None
+        ids = set(source["ids"]) if source else set()
+        page = None
+        shown = False
+
+        if kind == "playlist":
+            page = "Playlists"
+            shown = self.views[page].view_playlist(source["key"], track)
+        elif kind == "album":
+            page = "Albums"
+            shown = self.views[page].view_album(ids, track)
+        elif kind in ("artist", "artist-compilations"):
+            page = "Artists"
+            shown = self.views[page].view_artist(ids, track)
+        elif kind == "list":
+            page = (
+                "Compilations"
+                if (
+                    source["key"] == self.views["Compilations"].title
+                    and self.settings.compilations_enabled
+                )
+                else "Library"
+            )
+            self.views[page].show_track(track)
+            shown = True
+
+        if not shown:
+            # A track played on its own, or from something that no longer
+            # exists: it is in the Library (or the Compilations page).
+            page = (
+                "Compilations"
+                if self.settings.compilations_enabled and is_compilation(track)
+                else "Library"
+            )
+            self.views[page].show_track(track)
+
+        self._select_page(page)
 
     def _edit_track(self, track):
         def save(values):
@@ -952,18 +1065,22 @@ class MelodyWindow(Adw.ApplicationWindow):
         """The edit button over a playlist's picture: pick, then apply right
         away (there is no Save step outside the edit window). A playlist has
         no suggestions: the person picks an image file."""
-        def apply(data):
-            try:
-                set_playlist_cover(self.database, playlist["id"], data)
-            except Exception as error:
-                show_error_dialog(
-                    self, "Could not change the playlist's image", error,
-                )
-                return
+        show_image_picker(
+            self,
+            [],
+            lambda data: self._apply_playlist_image(playlist, data),
+        )
 
-            self.views["Playlists"].refresh()
+    def _apply_playlist_image(self, playlist, data):
+        try:
+            set_playlist_cover(self.database, playlist["id"], data)
+        except Exception as error:
+            show_error_dialog(
+                self, "Could not change the playlist's image", error,
+            )
+            return
 
-        show_image_picker(self, [], apply)
+        self.views["Playlists"].refresh()
 
     def _edit_album(self, album):
         def save(values):
@@ -1088,40 +1205,151 @@ class MelodyWindow(Adw.ApplicationWindow):
         "Apply artwork" button writes it into them)."""
         track_ids = [track["id"] for track in album["tracks"]]
 
-        def apply(data):
-            result = {"errors": []}
-            self._apply_image(
-                result,
-                lambda: self.library_editor.set_album_image(
-                    album["artist"],
-                    album["title"],
-                    data,
-                    apply_to_tracks=False,
-                ),
-            )
-            self._finish_collection_rename(
-                result, "album", refresh_artwork_ids=track_ids,
-            )
-
         show_image_picker(
             self,
             album_sources(album["artist"], album["title"]),
-            apply,
+            lambda data: self._apply_album_image(album, data),
+        )
+
+    def _apply_album_image(self, album, data):
+        """Make ``data`` the album's cover (the tracks keep their own images)."""
+        track_ids = [track["id"] for track in album["tracks"]]
+        result = {"errors": []}
+        self._apply_image(
+            result,
+            lambda: self.library_editor.set_album_image(
+                album["artist"],
+                album["title"],
+                data,
+                apply_to_tracks=False,
+            ),
+        )
+        self._finish_collection_rename(
+            result, "album", refresh_artwork_ids=track_ids,
         )
 
     def _change_artist_image(self, artist):
         """The edit button over an artist's picture (see above)."""
-        def apply(data):
-            result = {"errors": []}
-            self._apply_image(
-                result,
-                lambda: self.library_editor.set_artist_image(
-                    artist["name"], data,
-                ),
-            )
-            self._finish_collection_rename(result, "artist")
+        show_image_picker(
+            self,
+            artist_sources(artist["name"]),
+            lambda data: self._apply_artist_image(artist, data),
+        )
 
-        show_image_picker(self, artist_sources(artist["name"]), apply)
+    def _apply_artist_image(self, artist, data):
+        result = {"errors": []}
+        self._apply_image(
+            result,
+            lambda: self.library_editor.set_artist_image(
+                artist["name"], data,
+            ),
+        )
+        self._finish_collection_rename(result, "artist")
+
+    def _apply_track_image(self, track, data):
+        result = {"errors": []}
+        self._apply_image(
+            result,
+            lambda: self.library_editor.set_track_image(track["id"], data),
+        )
+        self._finish_collection_rename(
+            result, "track", refresh_artwork_ids=[track["id"]],
+        )
+
+    # ------------------------------------------------------------------
+    # "Copy artwork" / "Paste artwork" in the right-click menus
+    # ------------------------------------------------------------------
+
+    def _copy_artwork(self, data, what):
+        """Put ``data`` on the clipboard; ``what`` names the item for the
+        message shown when there is nothing to copy."""
+        if not data:
+            show_error_dialog(
+                self,
+                "Nothing to copy",
+                f"{what} has no image of its own to copy.",
+            )
+            return
+
+        try:
+            copy_image_to_clipboard(data)
+        except Exception as error:
+            show_error_dialog(self, "Could not copy the image", error)
+
+    def _paste_artwork(self, apply):
+        """Read the image on the clipboard and give it to ``apply(data)``."""
+        def received(data):
+            if not data:
+                show_error_dialog(
+                    self,
+                    "Nothing to paste",
+                    "The clipboard does not hold an image that can be read.",
+                )
+                return
+
+            apply(data)
+
+        read_clipboard_image(received)
+
+    def _copy_track_artwork(self, track):
+        try:
+            data = get_track_artwork_bytes(Path(track["path"]))
+        except Exception:
+            data = None
+
+        self._copy_artwork(data, f"“{track.get('title') or 'This track'}”")
+
+    def _paste_track_artwork(self, track):
+        self._paste_artwork(lambda data: self._apply_track_image(track, data))
+
+    def _copy_album_artwork(self, album):
+        self._copy_artwork(
+            self._album_artwork_bytes(album),
+            f"“{album['title']}”",
+        )
+
+    def _paste_album_artwork(self, album):
+        self._paste_artwork(lambda data: self._apply_album_image(album, data))
+
+    def _copy_artist_image(self, artist):
+        folder = self.library_manager.music_folder / _sanitize_name(
+            artist["name"]
+        )
+        self._copy_artwork(
+            get_local_artist_artwork_bytes(folder),
+            artist["name"],
+        )
+
+    def _paste_artist_image(self, artist):
+        self._paste_artwork(lambda data: self._apply_artist_image(artist, data))
+
+    def _copy_playlist_artwork(self, playlist):
+        data = None
+        chosen = get_playlist_cover(self.database, playlist["id"])
+
+        if chosen:
+            try:
+                data = Path(chosen).read_bytes()
+            except OSError:
+                data = None
+
+        if data is None:
+            # No picture of its own: the cover of its first track, which is
+            # what the playlist shows.
+            first = self.views["Playlists"].library_tracks_of(playlist)[:1]
+
+            for track in first:
+                try:
+                    data = get_album_artwork_bytes(Path(track["path"]))
+                except Exception:
+                    data = None
+
+        self._copy_artwork(data, f"“{playlist['name']}”")
+
+    def _paste_playlist_artwork(self, playlist):
+        self._paste_artwork(
+            lambda data: self._apply_playlist_image(playlist, data)
+        )
 
     @staticmethod
     def _apply_image(result, apply):
@@ -1269,12 +1497,21 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self._attach_artist_artwork(tracks)
         self.tracks = tracks
-        self.playback_manager.set_queue(tracks)
+        self.playback_manager.refresh_tracks(tracks)
+        self._refresh_player_bar()
         self.views["Library"].set_tracks(tracks)
         self.views["Compilations"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)
+
+    def _refresh_player_bar(self):
+        """After the library was reloaded, show the playing track as it is now
+        (an edit may have changed its title, artist or artwork)."""
+        current = self.playback_manager.current_track
+
+        if current is not None:
+            self.player_bar.refresh_track(current)
 
     def _on_sync_failed(self, message):
         self.sync_spinner.stop()
@@ -1288,18 +1525,28 @@ class MelodyWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _play_selected_track(self):
-        """Play button with nothing loaded: play the track selected on the
-        page showing (Library or Compilations), like a double click on it.
+        """Play button with nothing loaded: do what the page showing would do.
 
-        False when there is no such track, so the button does what it
-        normally does.
+        The selected track is played first, like a double click on it (the
+        Library and Compilations pages). With none selected, it is the page's
+        own Play button: the whole list on the Library and Compilations
+        pages, the album, artist or playlist whose page is open.
+
+        False when the page has nothing to play (a grid of albums, say), so
+        the button does what it normally does.
         """
         page = self.content_stack.get_visible_child_name()
+        view = self.views.get(page.capitalize())
 
-        if page in ("library", "compilations"):
-            return self.views[page.capitalize()].play_selected()
+        if view is None:
+            return False
 
-        return False
+        play_selected = getattr(view, "play_selected", None)
+
+        if play_selected is not None and play_selected():
+            return True
+
+        return view.play_page()
 
     def _on_playback_error(self, message):
         self.sync_status.set_visible(True)

@@ -1054,6 +1054,30 @@ def get_local_artist_artwork(artist_folder: Path, size: int = 256) -> str | None
         return None
 
 
+def get_local_artist_artwork_bytes(artist_folder: Path) -> bytes | None:
+    """Full-size picture of the artist: the image in their own folder
+    (artist.jpg...), or None when there is none."""
+    try:
+        local_image = _find_local_artist_image(Path(artist_folder))
+
+        return local_image.read_bytes() if local_image else None
+
+    except OSError:
+        return None
+
+
+def image_as_png(data: bytes) -> bytes:
+    """``data`` (any image Pillow can read) as PNG, straightened by its EXIF
+    rotation. Raises if it is not an image."""
+    with Image.open(BytesIO(data)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    return buffer.getvalue()
+
+
 def get_online_album_artwork(artist: str, album: str) -> bytes | None:
     """Cover from MusicBrainz / the Cover Art Archive."""
     return _get_online_artwork(artist, album)
