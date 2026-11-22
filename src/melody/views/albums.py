@@ -6,14 +6,12 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk, Pango
 
 from melody.services.collection_actions import (
-    ALBUM_SORT_OPTIONS,
     album_key,
     album_source,
     attach_track_context_menu,
     is_playback_source,
     open_artist_named,
     reveal_track_row,
-    sort_album_tracks,
     toggle_track_playback,
     track_is_playing,
 )
@@ -26,6 +24,13 @@ from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.link_label import make_link
+from melody.widgets.track_table import (
+    ALBUM_COLUMNS,
+    TrackSort,
+    TrackTableHeader,
+    create_track_row,
+    update_play_count_in_list,
+)
 from melody.widgets.value_label import value_label
 
 
@@ -45,6 +50,8 @@ class AlbumsView(Gtk.Box):
         self.on_rename_album_artist = None
         self.on_change_album_image = None
         self.on_import = None
+        # The column the album's track list is sorted by.
+        self.track_sort = TrackSort()
 
         self._build_header()
         self._build_grid()
@@ -447,15 +454,6 @@ class AlbumsView(Gtk.Box):
         self.details_heading.add_css_class("title-2")
         self.details_heading.set_hexpand(True)
 
-        self.details_sort_dropdown = Gtk.DropDown.new_from_strings(
-            ALBUM_SORT_OPTIONS
-        )
-        self.details_sort_dropdown.set_selected(0)
-        self.details_sort_dropdown.connect(
-            "notify::selected",
-            self._on_details_sort_changed,
-        )
-
         header.append(back_button)
         header.append(self.details_heading)
         self.details_page.append(header)
@@ -522,10 +520,6 @@ class AlbumsView(Gtk.Box):
         info_labels.append(self.details_track_count)
         info_labels.append(actions)
 
-        # Sort selector: bottom-right of the header, right above the list.
-        self.details_sort_dropdown.set_valign(Gtk.Align.END)
-        self.details_sort_dropdown.set_halign(Gtk.Align.END)
-
         info.append(
             with_edit_button(
                 self.details_artwork_stack,
@@ -533,7 +527,6 @@ class AlbumsView(Gtk.Box):
             )
         )
         info.append(info_labels)
-        info.append(self.details_sort_dropdown)
         self.details_page.append(info)
 
         self.details_page.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
@@ -552,7 +545,25 @@ class AlbumsView(Gtk.Box):
         track_scroll.set_margin_bottom(16)
         track_scroll.set_child(self.track_list)
 
-        self.details_page.append(track_scroll)
+        # The column names stay above the scrolled rows, in view while the
+        # list scrolls; they sort the list when clicked.
+        track_header = TrackTableHeader(
+            self.track_sort,
+            self._refresh_detail_tracks,
+            columns=ALBUM_COLUMNS,
+            margin_start=24,
+            margin_end=24,
+        )
+
+        track_table = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+        )
+        track_table.set_vexpand(True)
+        track_table.append(track_header)
+        track_table.append(track_scroll)
+
+        self.details_page.append(track_table)
 
     def _show_album(self, album):
         self.current_album = album
@@ -578,34 +589,7 @@ class AlbumsView(Gtk.Box):
         self._update_play_buttons()
 
     def _create_track_row(self, track):
-        row = Gtk.ListBoxRow()
-        row.track = track
-
-        content = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=12,
-        )
-        content.set_margin_start(12)
-        content.set_margin_end(12)
-        content.set_margin_top(8)
-        content.set_margin_bottom(8)
-
-        title = Gtk.Label(
-            label=str(track.get("title") or "Unknown Title"),
-            xalign=0,
-        )
-        title.set_ellipsize(Pango.EllipsizeMode.END)
-        title.set_hexpand(True)
-
-        duration = Gtk.Label(
-            label=self._format_duration(track_length(track)),
-            xalign=1,
-        )
-        duration.add_css_class("dim-label")
-
-        content.append(title)
-        content.append(duration)
-        row.set_child(content)
+        row = create_track_row(track, columns=ALBUM_COLUMNS)
 
         if self._edit_track is not None:
             attach_track_context_menu(
@@ -640,10 +624,7 @@ class AlbumsView(Gtk.Box):
                 album is self.current_album
                 and self.stack.get_visible_child_name() == "details"
         ):
-            return sort_album_tracks(
-                album["tracks"],
-                self.details_sort_dropdown.get_selected(),
-            )
+            return self.track_sort.sort(album["tracks"])
 
         return album["tracks"]
 
@@ -657,14 +638,12 @@ class AlbumsView(Gtk.Box):
         if self.current_album is None:
             return
 
-        for track in sort_album_tracks(
-                self.current_album["tracks"],
-                self.details_sort_dropdown.get_selected(),
-        ):
+        for track in self.track_sort.sort(self.current_album["tracks"]):
             self.track_list.append(self._create_track_row(track))
 
-    def _on_details_sort_changed(self, dropdown, pspec):
-        self._refresh_detail_tracks()
+    def update_play_count(self, track_id, count):
+        """A track was played once more: update its row in the album's list."""
+        update_play_count_in_list(self.track_list, track_id, count)
 
     def _on_artist_link_clicked(self):
         if self.current_album is not None:

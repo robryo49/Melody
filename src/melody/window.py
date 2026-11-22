@@ -380,8 +380,12 @@ class MelodyWindow(Adw.ApplicationWindow):
             if candidate.get("id") == track.get("id"):
                 candidate["play_count"] = count
 
-        for name in ("Library", "Compilations"):
-            self.views[name].refresh_play_count()
+        # Every list showing the track shows its new count.
+        for view in self.views.values():
+            update = getattr(view, "update_play_count", None)
+
+            if update is not None:
+                update(track["id"], count)
 
     def _show_preferences(self):
         show_preferences_dialog(self, self.settings, self._rescan_library)

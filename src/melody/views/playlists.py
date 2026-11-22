@@ -6,12 +6,10 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk, Pango
 
 from melody.services.collection_actions import (
-    SORT_OPTIONS,
     attach_track_context_menu,
     is_playback_source,
     playback_source,
     reveal_track_row,
-    sort_tracks,
     toggle_track_playback,
     track_is_playing,
 )
@@ -20,6 +18,12 @@ from melody.services.track_range import track_length
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.import_dialogs import create_import_button
+from melody.widgets.track_table import (
+    TrackSort,
+    TrackTableHeader,
+    create_track_row,
+    update_play_count_in_list,
+)
 from melody.widgets.value_label import value_label
 
 
@@ -36,6 +40,8 @@ class PlaylistsView(Gtk.Box):
         self.playback_manager = None
         self._playlist_paths = {}
         self._playlist_covers = {}
+        # The column the playlist's track list is sorted by.
+        self.track_sort = TrackSort()
 
         self.on_create_playlist = None
         self.on_rename_playlist = None
@@ -299,10 +305,6 @@ class PlaylistsView(Gtk.Box):
         self.details_heading.add_css_class("title-2")
         self.details_heading.set_hexpand(True)
 
-        self.sort_dropdown = Gtk.DropDown.new_from_strings(SORT_OPTIONS)
-        self.sort_dropdown.set_selected(0)
-        self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
-
         header.append(back_button)
         header.append(self.details_heading)
         self.details_page.append(header)
@@ -366,15 +368,10 @@ class PlaylistsView(Gtk.Box):
         labels.append(self.track_count_label)
         labels.append(actions)
 
-        # Sort selector: bottom-right of the header, right above the list.
-        self.sort_dropdown.set_valign(Gtk.Align.END)
-        self.sort_dropdown.set_halign(Gtk.Align.END)
-
         info.append(
             with_edit_button(self.cover_stack, self._on_change_cover_clicked)
         )
         info.append(labels)
-        info.append(self.sort_dropdown)
         self.details_page.append(info)
 
         self.details_page.append(
@@ -398,7 +395,24 @@ class PlaylistsView(Gtk.Box):
         track_scroll.set_margin_bottom(16)
         track_scroll.set_child(self.track_list)
 
-        self.details_page.append(track_scroll)
+        # The column names stay above the scrolled rows, in view while the
+        # list scrolls; they sort the list when clicked.
+        track_header = TrackTableHeader(
+            self.track_sort,
+            self._refresh_detail_tracks,
+            margin_start=24,
+            margin_end=24,
+        )
+
+        track_table = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+        )
+        track_table.set_vexpand(True)
+        track_table.append(track_header)
+        track_table.append(track_scroll)
+
+        self.details_page.append(track_table)
 
     def _show_playlist(self, playlist):
         self.current_playlist = playlist
@@ -442,34 +456,7 @@ class PlaylistsView(Gtk.Box):
         self._update_play_buttons()
 
     def _create_track_row(self, track):
-        row = Gtk.ListBoxRow()
-        row.track = track
-
-        content = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=12,
-        )
-        content.set_margin_start(12)
-        content.set_margin_end(12)
-        content.set_margin_top(8)
-        content.set_margin_bottom(8)
-
-        title = Gtk.Label(
-            label=str(track.get("title") or "Unknown Title"),
-            xalign=0,
-        )
-        title.set_ellipsize(Pango.EllipsizeMode.END)
-        title.set_hexpand(True)
-
-        duration = Gtk.Label(
-            label=self._format_duration(track_length(track)),
-            xalign=1,
-        )
-        duration.add_css_class("dim-label")
-
-        content.append(title)
-        content.append(duration)
-        row.set_child(content)
+        row = create_track_row(track)
 
         if self.on_edit_track is not None:
             playlist_id = self.current_playlist["id"]
@@ -490,10 +477,7 @@ class PlaylistsView(Gtk.Box):
         return row
 
     def _toggle_track(self, track):
-        queue = sort_tracks(
-            self.current_tracks,
-            self.sort_dropdown.get_selected(),
-        )
+        queue = self.track_sort.sort(self.current_tracks)
         toggle_track_playback(
             self.playback_manager,
             track,
@@ -512,10 +496,7 @@ class PlaylistsView(Gtk.Box):
         if self.current_playlist is None:
             return
 
-        tracks = sort_tracks(
-            self.current_tracks,
-            self.sort_dropdown.get_selected(),
-        )
+        tracks = self.track_sort.sort(self.current_tracks)
 
         for track in tracks:
             self.track_list.append(self._create_track_row(track))
@@ -584,10 +565,7 @@ class PlaylistsView(Gtk.Box):
                 and self.current_playlist["id"] == playlist["id"]
                 and self.stack.get_visible_child_name() == "details"
         ):
-            return sort_tracks(
-                self.current_tracks,
-                self.sort_dropdown.get_selected(),
-            )
+            return self.track_sort.sort(self.current_tracks)
 
         by_path = {track.get("path"): track for track in self.tracks}
         tracks = self.database.get_playlist_tracks(playlist["id"])
@@ -597,7 +575,7 @@ class PlaylistsView(Gtk.Box):
             track["artwork_path"] = cached.get("artwork_path")
             track["album_artwork_path"] = cached.get("album_artwork_path")
 
-        return sort_tracks(tracks, 0)
+        return TrackSort().sort(tracks)
 
     def _play_playlist(self, playlist):
         if self.playback_manager is None:
@@ -638,10 +616,7 @@ class PlaylistsView(Gtk.Box):
         if self.playback_manager is None:
             return
 
-        tracks = sort_tracks(
-            self.current_tracks,
-            self.sort_dropdown.get_selected(),
-        )
+        tracks = self.track_sort.sort(self.current_tracks)
 
         for index, track in enumerate(tracks):
             if track.get("id") == row.track.get("id"):
@@ -732,8 +707,14 @@ class PlaylistsView(Gtk.Box):
     # Navigation and sorting
     # ------------------------------------------------------------------
 
-    def _on_sort_changed(self, dropdown, pspec):
-        self._refresh_detail_tracks()
+    def update_play_count(self, track_id, count):
+        """A track was played once more: update its row in the playlist's
+        list."""
+        update_play_count_in_list(self.track_list, track_id, count)
+
+        for track in self.current_tracks:
+            if track.get("id") == track_id:
+                track["play_count"] = count
 
     def _on_back_clicked(self, button):
         # No playlist is open any more: a refresh must not bring it back.

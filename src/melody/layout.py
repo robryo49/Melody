@@ -12,9 +12,16 @@ SEARCH_WIDTH = 256
 
 
 def style_header_controls(sort_dropdown, search_entry):
-    """Give the sort dropdown and search bar the same size and gap on every page."""
+    """Give the sort dropdown and search bar the same size and gap on every page.
+
+    ``sort_dropdown`` is None on a page that has none."""
     search_entry.set_size_request(SEARCH_WIDTH, -1)
     search_entry.set_hexpand(False)
+
+    if sort_dropdown is None:
+        # Same gap before the search bar as the dropdown would have left.
+        search_entry.set_margin_start(PAGE_MARGIN - HEADER_SPACING)
+        return
 
     # The header box already puts HEADER_SPACING between its children; top it
     # up so the gap between the dropdown and the search bar is PAGE_MARGIN.

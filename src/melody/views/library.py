@@ -24,6 +24,12 @@ from melody.services.collection_actions import (
     track_is_playing,
 )
 from melody.widgets.link_label import make_link
+from melody.widgets.track_table import (
+    TrackSort,
+    TrackTableHeader,
+    create_track_row,
+    update_play_count_in_list,
+)
 
 
 class LibraryView(Gtk.Box):
@@ -64,6 +70,8 @@ class LibraryView(Gtk.Box):
         self._artwork_request_id = 0
         self._edit_track = None
         self._choose_playlist = None
+        # The column the list is sorted by (clicked in the header above it).
+        self.track_sort = TrackSort()
 
         self._build_header()
         self._build_list()
@@ -76,7 +84,7 @@ class LibraryView(Gtk.Box):
         self.content_box.set_vexpand(True)
 
         self.scrolled_window.set_hexpand(True)
-        self.content_box.append(self.scrolled_window)
+        self.content_box.append(self.list_column)
         self.content_box.append(self.details_container)
 
         self.empty_page = Adw.StatusPage(
@@ -184,22 +192,10 @@ class LibraryView(Gtk.Box):
             self._on_play_all_clicked,
         )
 
-        self.sort_dropdown = Gtk.DropDown.new_from_strings([
-            "Title",
-            "Album",
-            "Artist",
-            "Duration",
-            "Play Count",
-        ])
-        self.sort_dropdown.set_selected(0)
-        self.sort_dropdown.connect(
-            "notify::selected",
-            self._on_sort_changed,
-        )
-
         self.search_entry = Gtk.SearchEntry()
         self.search_entry.set_placeholder_text(self._search_placeholder)
-        style_header_controls(self.sort_dropdown, self.search_entry)
+        # The list is sorted from the column names above it: no dropdown.
+        style_header_controls(None, self.search_entry)
         self.search_entry.connect(
             "search-changed",
             self._on_search_changed,
@@ -209,7 +205,6 @@ class LibraryView(Gtk.Box):
         header.append(self.count_label)
         header.append(self.play_all_button)
         header.append(self.import_button)
-        header.append(self.sort_dropdown)
         header.append(self.search_entry)
         self.append(header)
 
@@ -239,6 +234,26 @@ class LibraryView(Gtk.Box):
         self.scrolled_window.set_margin_end(0)
         self.scrolled_window.set_margin_bottom(16)
         self.scrolled_window.set_child(self.track_list)
+
+        # The column names stay above the scrolled rows, so they are always
+        # in view; both share the list's margins to line up.
+        self.track_header = TrackTableHeader(
+            self.track_sort,
+            self._refresh_list,
+            with_artwork=True,
+            margin_start=24,
+            margin_end=0,
+        )
+        self.track_header.set_margin_top(4)
+
+        self.list_column = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+        )
+        self.list_column.set_hexpand(True)
+        self.list_column.set_vexpand(True)
+        self.list_column.append(self.track_header)
+        self.list_column.append(self.scrolled_window)
 
     def _build_details_panel(self):
         # The container stacks the track info (top) and the action buttons
@@ -496,18 +511,6 @@ class LibraryView(Gtk.Box):
         return label
 
     def _create_track_row(self, track):
-        row = Gtk.ListBoxRow()
-        row.track = track
-
-        content = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=12,
-        )
-        content.set_margin_start(10)
-        content.set_margin_end(12)
-        content.set_margin_top(6)
-        content.set_margin_bottom(6)
-
         artwork = Gtk.Image.new_from_icon_name(
             "audio-x-generic-symbolic"
         )
@@ -525,46 +528,12 @@ class LibraryView(Gtk.Box):
             artwork.set_from_file(artwork_path)
             artwork.set_pixel_size(self.THUMBNAIL_SIZE)
 
-        title = Gtk.Label(
-            label=str(track.get("title") or "Unknown Title"),
-            xalign=0,
+        row = create_track_row(
+            track,
+            artwork=artwork,
+            vertical_margin=6,
         )
-        title.set_hexpand(True)
-        title.set_ellipsize(Pango.EllipsizeMode.END)
 
-        album = Gtk.Label(
-            label=str(track.get("album") or ""),
-            xalign=0,
-        )
-        album.set_size_request(130, -1)
-        album.set_ellipsize(Pango.EllipsizeMode.END)
-        album.add_css_class("dim-label")
-        album.add_css_class("caption")
-
-        artist = Gtk.Label(
-            label=str(track.get("artist") or "Unknown Artist"),
-            xalign=0,
-        )
-        artist.set_size_request(120, -1)
-        artist.set_ellipsize(Pango.EllipsizeMode.END)
-        artist.add_css_class("dim-label")
-        artist.add_css_class("caption")
-
-        duration = Gtk.Label(
-            label=self._format_duration(track_length(track)),
-            xalign=1,
-        )
-        duration.set_size_request(52, -1)
-        duration.add_css_class("dim-label")
-        duration.add_css_class("caption")
-
-        content.append(artwork)
-        content.append(title)
-        content.append(album)
-        content.append(artist)
-        content.append(duration)
-
-        row.set_child(content)
         if self._edit_track is not None:
             attach_track_context_menu(
                 row,
@@ -715,39 +684,18 @@ class LibraryView(Gtk.Box):
 
         return f"Played {count} time{'s' if count != 1 else ''}"
 
-    def refresh_play_count(self):
-        """A track was played once more: update the count shown for the
-        selected track."""
+    def update_play_count(self, track_id, count):
+        """A track was played once more: update its row in the list and, if
+        it is the selected track, the count shown in the details."""
+        update_play_count_in_list(self.track_list, track_id, count)
+
         track = self._selected_track()
 
-        if track is not None:
+        if track is not None and track.get("id") == track_id:
             self.details_plays.set_text(self._plays_text(track))
 
     def _get_sorted_tracks(self, tracks):
-        sort_index = self.sort_dropdown.get_selected()
-        fields = ("title", "album", "artist", "duration", "play_count")
-        field = fields[sort_index]
-
-        if field == "play_count":
-            # Most played first, then by title.
-            return sorted(
-                tracks,
-                key=lambda track: (
-                    -(track.get("play_count") or 0),
-                    str(track.get("title") or "").casefold(),
-                ),
-            )
-
-        if field == "duration":
-            return sorted(
-                tracks,
-                key=lambda track: track_length(track),
-            )
-
-        return sorted(
-            tracks,
-            key=lambda track: str(track.get(field) or "").casefold(),
-        )
+        return self.track_sort.sort(tracks)
 
     def _get_filtered_tracks(self):
         query = self.search_entry.get_text().strip().casefold()
@@ -797,9 +745,6 @@ class LibraryView(Gtk.Box):
         self._update_view()
 
     def _on_search_changed(self, search_entry):
-        self._refresh_list()
-
-    def _on_sort_changed(self, dropdown, pspec):
         self._refresh_list()
 
     def set_tracks(self, tracks):
