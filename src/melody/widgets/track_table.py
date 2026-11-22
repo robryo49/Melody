@@ -40,7 +40,7 @@ _COLUMNS = {
     "album": ("Album", 3, 64, False),
     "artist": ("Artist", 3, 64, False),
     "play_count": ("Play Count", 0, 92, True),
-    "duration": ("Duration", 0, 80, True),
+    "duration": ("Duration", 0, 90, True),
 }
 
 # Columns whose first click sorts the biggest value first.
@@ -58,6 +58,14 @@ _CSS = """
 .track-header-cell:hover image,
 .track-header-cell.sorted label,
 .track-header-cell.sorted image {
+    opacity: 1;
+}
+.track-heart {
+    opacity: 0;
+    font-size: 1.15em;
+}
+row:hover .track-heart,
+.track-heart.favorite {
     opacity: 1;
 }
 """
@@ -345,6 +353,76 @@ class TrackTableHeader(Gtk.Box):
 
 
 # ----------------------------------------------------------------------
+# Favorites
+# ----------------------------------------------------------------------
+
+# What a click on a row's heart does: ``handler(track)`` toggles the track's
+# favorite mark. Set once by the window, so the rows need no database.
+_favorite_handler = None
+
+
+def set_favorite_handler(handler):
+    global _favorite_handler
+    _favorite_handler = handler
+
+
+def toggle_favorite(track):
+    """Mark ``track`` as a favorite, or take the mark away."""
+    if _favorite_handler is not None:
+        _favorite_handler(track)
+
+
+def _show_favorite(heart, favorite):
+    """A filled heart for a favorite, an outline for any other track (which
+    only shows while the row is hovered)."""
+    heart.set_text("\u2665" if favorite else "\u2661")
+
+    if favorite:
+        heart.add_css_class("favorite")
+    else:
+        heart.remove_css_class("favorite")
+
+
+def _create_heart(track):
+    heart = Gtk.Label()
+    heart.add_css_class("track-heart")
+    # A little away from the right edge of the column, to look balanced
+    # between the duration and the edge of the row.
+    heart.set_margin_end(14)
+    heart.set_cursor_from_name("pointer")
+    _show_favorite(heart, bool(track.get("favorite")))
+
+    def on_pressed(gesture, _n_press, _x, _y):
+        # Keep the row from also being selected or played by this click.
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        toggle_favorite(track)
+
+    gesture = Gtk.GestureClick.new()
+    gesture.set_button(Gdk.BUTTON_PRIMARY)
+    gesture.connect("pressed", on_pressed)
+    heart.add_controller(gesture)
+
+    return heart
+
+
+def update_favorite_in_list(list_box, track_id, favorite):
+    """A track was marked or unmarked as a favorite: update its row."""
+    child = list_box.get_first_child()
+
+    while child is not None:
+        track = getattr(child, "track", None)
+
+        if track is not None and track.get("id") == track_id:
+            track["favorite"] = 1 if favorite else 0
+            heart = getattr(child, "favorite_label", None)
+
+            if heart is not None:
+                _show_favorite(heart, favorite)
+
+        child = child.get_next_sibling()
+
+
+# ----------------------------------------------------------------------
 # Rows
 # ----------------------------------------------------------------------
 
@@ -382,7 +460,21 @@ def create_track_row(
         if key == "play_count":
             row.play_count_label = label
 
-        widgets.append(label)
+        if key == "duration":
+            # The duration is mostly empty space (the column is as wide as
+            # its name), so the heart goes in the same cell, at its right
+            # end.
+            label.set_hexpand(True)
+            heart = _create_heart(track)
+            row.favorite_label = heart
+
+            cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            cell.append(label)
+            cell.append(heart)
+            widgets.append(cell)
+        else:
+            widgets.append(label)
+
         cells.append(_cell_for(key))
 
     content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)

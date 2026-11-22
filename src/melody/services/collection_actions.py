@@ -11,6 +11,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from melody.services.artwork import get_cached_own_artwork, image_as_png
+from melody.widgets.track_table import toggle_favorite
 from melody.services.compilations import (
     automatic_is_compilation,
     format_clock,
@@ -1827,6 +1828,12 @@ def attach_track_context_menu(
 
         menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         add_item("Add to playlist…", on_add_to_playlist)
+        add_item(
+            "Remove from favorites"
+            if track.get("favorite")
+            else "Add to favorites",
+            toggle_favorite,
+        )
 
         if on_remove_from_playlist is not None:
             add_item("Remove from playlist", on_remove_from_playlist)

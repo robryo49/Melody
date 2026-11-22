@@ -102,8 +102,8 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 - [ ] ~~Import image from Google image~~
 - [x] Copy-paste artwork
 - [ ] Drag and drop to import
-- [ ] Play count and last played
-- [ ] Favorites
+- [x] Play count and last played
+- [x] Favorites
 - [ ] Search menu that searches among everything
 - [ ] Duplicate check on import
 - [ ] Multi-track select, with a different right-click menu than single-track select

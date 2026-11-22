@@ -63,6 +63,7 @@ from melody.widgets.import_dialogs import (
     show_search_dialog,
 )
 from melody.widgets.player_bar import PlayerBar
+from melody.widgets.track_table import set_favorite_handler
 
 
 class MelodyWindow(Adw.ApplicationWindow):
@@ -108,15 +109,26 @@ class MelodyWindow(Adw.ApplicationWindow):
                 empty_icon="media-playlist-consecutive-symbolic",
                 track_filter=is_compilation,
             ),
+            "Favorites": LibraryView(
+                title="Favorites",
+                noun="favorite",
+                search_placeholder="Search favorites…",
+                empty_title="No favorites yet",
+                empty_description=(
+                    "Click the heart next to a track to add it here."
+                ),
+                empty_icon="emblem-favorite-symbolic",
+                track_filter=lambda track: bool(track.get("favorite")),
+            ),
             "Albums": AlbumsView(),
             "Artists": ArtistsView(),
             "Playlists": PlaylistsView(),
         }
 
-        for name in ("Library", "Compilations", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Albums", "Artists"):
             self.views[name].set_playback_manager(self.playback_manager)
 
-        for name in ("Library", "Compilations", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Albums", "Artists"):
             self.views[name].set_context_actions(
                 self._edit_track,
                 self._choose_playlist_for_track,
@@ -128,6 +140,8 @@ class MelodyWindow(Adw.ApplicationWindow):
         for name in ("Albums", "Artists", "Playlists"):
             self.views[name].set_import_callback(self._import_music)
         set_track_deletion(self._delete_track)
+        # The heart next to a track in every list.
+        set_favorite_handler(self._toggle_favorite)
         set_track_queue_actions(
             self.playback_manager.play_after_current,
             self.playback_manager.add_to_queue,
@@ -226,6 +240,7 @@ class MelodyWindow(Adw.ApplicationWindow):
             ("Library", "audio-x-generic-symbolic"),
             # Only shown while compilations are enabled.
             ("Compilations", "media-playlist-consecutive-symbolic"),
+            ("Favorites", "emblem-favorite-symbolic"),
             ("Albums", "media-optical-symbolic"),
             ("Artists", "system-users-symbolic"),
             ("Playlists", "view-list-symbolic"),
@@ -387,6 +402,44 @@ class MelodyWindow(Adw.ApplicationWindow):
             if update is not None:
                 update(track["id"], count)
 
+    def _toggle_favorite(self, track):
+        """A click on a track's heart: mark it as a favorite, or take the mark
+        away."""
+        favorite = not track.get("favorite")
+
+        try:
+            self.database.set_favorite(track["id"], favorite)
+        except Exception as error:
+            show_error_dialog(self, "Could not change the favorite", error)
+            return
+
+        # Rows and queues may hold their own copies of the track, so the
+        # library's copy and every row showing it are updated.
+        track["favorite"] = 1 if favorite else 0
+
+        for candidate in self.tracks:
+            if candidate.get("id") == track.get("id"):
+                candidate["favorite"] = 1 if favorite else 0
+
+        for view in self.views.values():
+            update = getattr(view, "update_favorite", None)
+
+            if update is not None:
+                update(track["id"], favorite)
+
+        current = self.playback_manager.current_track
+
+        if current is not None and current.get("id") == track.get("id"):
+            current["favorite"] = 1 if favorite else 0
+
+        # The Favorites page lists exactly the marked tracks. Done once the
+        # click is over, as it may remove the very row that was clicked.
+        GLib.idle_add(self._refresh_favorites_page)
+
+    def _refresh_favorites_page(self):
+        self.views["Favorites"].set_tracks(self.tracks)
+        return GLib.SOURCE_REMOVE
+
     def _show_preferences(self):
         show_preferences_dialog(self, self.settings, self._rescan_library)
 
@@ -405,7 +458,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         # Which tracks go where depends on the settings: sort them out again.
         self._update_compilations_ui()
 
-        for name in ("Library", "Compilations", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Albums", "Artists"):
             self.views[name].set_tracks(self.tracks)
 
     def _on_navigation_selected(self, list_box, row):
@@ -537,6 +590,7 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self.views["Library"].set_tracks(tracks)
         self.views["Compilations"].set_tracks(tracks)
+        self.views["Favorites"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(
@@ -643,14 +697,18 @@ class MelodyWindow(Adw.ApplicationWindow):
             page = "Artists"
             shown = self.views[page].view_artist(ids, track)
         elif kind == "list":
-            page = (
-                "Compilations"
-                if (
-                    source["key"] == self.views["Compilations"].title
-                    and self.settings.compilations_enabled
+            if source["key"] == self.views["Favorites"].title:
+                page = "Favorites"
+            else:
+                page = (
+                    "Compilations"
+                    if (
+                        source["key"] == self.views["Compilations"].title
+                        and self.settings.compilations_enabled
+                    )
+                    else "Library"
                 )
-                else "Library"
-            )
+
             self.views[page].show_track(track)
             shown = True
 
@@ -1505,6 +1563,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self._refresh_player_bar()
         self.views["Library"].set_tracks(tracks)
         self.views["Compilations"].set_tracks(tracks)
+        self.views["Favorites"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)

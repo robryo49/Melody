@@ -65,6 +65,8 @@ class Database:
                 # How many times the track was played (see
                 # PlaybackManager.on_play_counted).
                 "play_count": "INTEGER NOT NULL DEFAULT 0",
+                # 1 for a track marked as a favorite (the heart in the lists).
+                "favorite": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -323,6 +325,17 @@ class Database:
                 "SELECT play_count FROM tracks WHERE id = ?",
                 (track_id,),
             ).fetchone()[0]
+
+    def set_favorite(self, track_id: str, favorite: bool) -> None:
+        """Mark a track as a favorite, or take the mark away."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tracks SET favorite = ? WHERE id = ?",
+                (1 if favorite else 0, track_id),
+            )
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"Track does not exist: {track_id}")
 
     def update_track(self, track_id: str, path: Path, metadata):
         path = str(Path(path).expanduser().resolve())

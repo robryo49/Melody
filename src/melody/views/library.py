@@ -28,6 +28,8 @@ from melody.widgets.track_table import (
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    toggle_favorite,
+    update_favorite_in_list,
     update_play_count_in_list,
 )
 
@@ -381,10 +383,17 @@ class LibraryView(Gtk.Box):
             self._on_playlist_button_clicked,
         )
 
+        self.favorite_button = Gtk.Button(label="Add to favorites")
+        self.favorite_button.connect(
+            "clicked",
+            self._on_favorite_button_clicked,
+        )
+
         for button in (
             self.play_button,
             self.edit_button,
             self.playlist_button,
+            self.favorite_button,
         ):
             button.set_sensitive(False)
             box.append(button)
@@ -403,8 +412,15 @@ class LibraryView(Gtk.Box):
             self.play_button,
             self.edit_button,
             self.playlist_button,
+            self.favorite_button,
         ):
             button.set_sensitive(has_track)
+
+        self.favorite_button.set_label(
+            "Remove from favorites"
+            if has_track and track.get("favorite")
+            else "Add to favorites"
+        )
 
         playing = has_track and track_is_playing(self.playback_manager, track)
         self.play_button.set_label("Pause" if playing else "Play")
@@ -492,6 +508,12 @@ class LibraryView(Gtk.Box):
 
         if track is not None and self._edit_track is not None:
             self._edit_track(track)
+
+    def _on_favorite_button_clicked(self, button):
+        track = self._selected_track()
+
+        if track is not None:
+            toggle_favorite(track)
 
     def _on_playlist_button_clicked(self, button):
         track = self._selected_track()
@@ -693,6 +715,10 @@ class LibraryView(Gtk.Box):
 
         if track is not None and track.get("id") == track_id:
             self.details_plays.set_text(self._plays_text(track))
+
+    def update_favorite(self, track_id, favorite):
+        """A track was marked or unmarked as a favorite: update its heart."""
+        update_favorite_in_list(self.track_list, track_id, favorite)
 
     def _get_sorted_tracks(self, tracks):
         return self.track_sort.sort(tracks)

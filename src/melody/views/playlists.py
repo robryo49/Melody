@@ -22,6 +22,7 @@ from melody.widgets.track_table import (
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    update_favorite_in_list,
     update_play_count_in_list,
 )
 from melody.widgets.value_label import value_label
@@ -715,6 +716,14 @@ class PlaylistsView(Gtk.Box):
         for track in self.current_tracks:
             if track.get("id") == track_id:
                 track["play_count"] = count
+
+    def update_favorite(self, track_id, favorite):
+        """A track was marked or unmarked as a favorite: update its heart."""
+        update_favorite_in_list(self.track_list, track_id, favorite)
+
+        for track in self.current_tracks:
+            if track.get("id") == track_id:
+                track["favorite"] = 1 if favorite else 0
 
     def _on_back_clicked(self, button):
         # No playlist is open any more: a refresh must not bring it back.

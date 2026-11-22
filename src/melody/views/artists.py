@@ -30,10 +30,10 @@ from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.link_label import make_link
 from melody.widgets.track_table import (
     ALBUM_COLUMNS,
-    DEFAULT_COLUMNS,
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    update_favorite_in_list,
     update_play_count_in_list,
 )
 from melody.widgets.value_label import value_label
@@ -492,6 +492,7 @@ class ArtistsView(Gtk.Box):
         header = TrackTableHeader(
             sort,
             self._refresh_artist_track_lists,
+            columns=ALBUM_COLUMNS,
             with_artwork=True,
         )
 
@@ -1389,11 +1390,12 @@ class ArtistsView(Gtk.Box):
                 artwork.set_from_file(artwork_path)
                 artwork.set_pixel_size(self.COMPILATION_THUMBNAIL_SIZE)
 
-        # Singles and compilations list every column; inside an album the
-        # album and artist are the same for all, so they are left out.
+        # The artist's page already says whose tracks these are, and a
+        # single or compilation has no album of its own to show: only the
+        # title, the play count and the duration.
         row = create_track_row(
             track,
-            columns=DEFAULT_COLUMNS if show_artwork else ALBUM_COLUMNS,
+            columns=ALBUM_COLUMNS,
             artwork=artwork,
             vertical_margin=6 if show_artwork else 8,
         )
@@ -1461,6 +1463,15 @@ class ArtistsView(Gtk.Box):
                 self.album_track_list,
         ):
             update_play_count_in_list(list_box, track_id, count)
+
+    def update_favorite(self, track_id, favorite):
+        """A track was marked or unmarked as a favorite: update its heart."""
+        for list_box in (
+                self.artist_compilation_list,
+                self.artist_single_list,
+                self.album_track_list,
+        ):
+            update_favorite_in_list(list_box, track_id, favorite)
 
     def _on_edit_artist_clicked(self):
         if self.current_artist is not None and self.on_rename_artist is not None:
