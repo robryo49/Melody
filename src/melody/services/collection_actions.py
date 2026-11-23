@@ -21,10 +21,10 @@ from melody.services.settings import get_settings
 from melody.services.singles import has_album
 from melody.services.track_range import track_length
 from melody.services.image_sources import (
-    album_sources,
-    artist_sources,
-    library_album_source,
-    playlist_sources,
+    album_search,
+    artist_search,
+    playlist_search,
+    track_search,
 )
 from melody.widgets.cover_style import install_cover_css
 from melody.widgets.image_picker import show_image_picker, texture_from_bytes
@@ -800,7 +800,7 @@ def show_edit_dialog(
         cover_loader=None,
         placeholder_icon="audio-x-generic-symbolic",
         hint=None,
-        image_sources=None,
+        image_search=None,
         apply_artwork=False,
         range_spec=None,
         compilation_spec=None,
@@ -822,11 +822,11 @@ def show_edit_dialog(
     actually changed. The cover is ``cover_path`` if it exists, otherwise
     ``cover_loader()`` is run in a thread and its result shown.
 
-    With ``image_sources`` (a function taking the fields' current values and
-    returning a list of ``ImageSource``) an edit button appears over the
-    cover while it is hovered. It opens the image picker; the chosen image
-    only replaces the preview, and is handed to ``callback`` as
-    ``values["image"]`` (raw bytes) when the person saves.
+    With ``image_search`` (a function taking the fields' current values and
+    returning an ``ImageSearch``, see ``services.image_sources``) an edit
+    button appears over the cover while it is hovered. It opens the image
+    picker; the chosen image only replaces the preview, and is handed to
+    ``callback`` as ``values["image"]`` (raw bytes) when the person saves.
 
     With ``apply_artwork`` an "Apply artwork" toggle sits under the cover.
     When it is on at Save time, ``values["apply_to_tracks"]`` is ``True``.
@@ -979,7 +979,7 @@ def show_edit_dialog(
     cover_overlay.add_overlay(cover_stack)
 
     edit_image_button = None
-    if image_sources is not None:
+    if image_search is not None:
         edit_image_button = Gtk.Button.new_from_icon_name(
             "document-edit-symbolic"
         )
@@ -1206,11 +1206,11 @@ def show_edit_dialog(
         on_changed()
 
     def on_edit_image_clicked(_button):
-        # Asked now, not when the window opened, so the suggestions follow
+        # Asked now, not when the window opened, so the search follows
         # whatever has been typed in the fields since.
         show_image_picker(
             window,
-            image_sources(current_values()),
+            image_search(current_values()),
             on_image_selected,
         )
 
@@ -1313,26 +1313,15 @@ def show_edit_track_dialog(
         },
     ]
 
-    def image_sources(values):
-        # The album in the window, not the one the track is in right now: it
-        # may have been changed above without being saved yet. The album
-        # artist always matches the artist typed in the window.
-        album_artist = values["artist"]
-
-        sources = []
-
-        # A single has no album, so there is no album image to borrow.
-        if values["album"]:
-            sources.append(
-                library_album_source(
-                    library_tracks,
-                    album_artist,
-                    values["album"],
-                )
-            )
-
-        sources.extend(album_sources(album_artist, values["album"]))
-        return sources
+    def image_search(values):
+        # What is in the window, not what the track is right now: it may have
+        # been changed above without being saved yet.
+        return track_search(
+            values["title"],
+            values["artist"],
+            values["album"],
+            library_tracks,
+        )
 
     # Where the track starts and stops playing (only when its length is
     # known).
@@ -1376,7 +1365,7 @@ def show_edit_track_dialog(
         callback,
         cover_loader=load_cover if track_path else None,
         hint=hint,
-        image_sources=image_sources,
+        image_search=image_search,
         range_spec=range_spec,
         compilation_spec=compilation_spec,
         allow_unchanged=allow_unchanged,
@@ -1422,7 +1411,7 @@ def show_edit_album_dialog(parent, album, library_tracks, callback):
             "The album's files are renamed and moved to match its title "
             "and artist."
         ),
-        image_sources=lambda values: album_sources(
+        image_search=lambda values: album_search(
             values["artist"],
             values["title"],
         ),
@@ -1455,7 +1444,7 @@ def show_edit_artist_dialog(parent, artist, library_tracks, callback):
             "All of this artist's files are renamed and moved to match. "
             "Picking an existing artist merges them into it."
         ),
-        image_sources=lambda values: artist_sources(values["name"]),
+        image_search=lambda values: artist_search(values["name"]),
         round_cover=True,
     )
 
@@ -1465,16 +1454,12 @@ def show_edit_playlist_dialog(
         playlist,
         cover_path,
         callback,
-        library_tracks=(),
 ):
     """Edit a playlist's name and picture.
 
     ``callback`` receives ``{"name": ...}``, plus ``"image"`` (raw bytes) when
-    a new picture was chosen. ``library_tracks`` are the playlist's tracks:
-    the albums they come from are offered as suggestions for the picture.
+    a new picture was chosen.
     """
-    library_tracks = list(library_tracks)
-
     specs = [
         {
             "key": "name",
@@ -1490,7 +1475,7 @@ def show_edit_playlist_dialog(
         callback,
         cover_path=cover_path,
         placeholder_icon="view-list-symbolic",
-        image_sources=lambda values: playlist_sources(library_tracks),
+        image_search=lambda values: playlist_search(),
     )
 
 

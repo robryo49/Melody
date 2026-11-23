@@ -16,7 +16,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 
 - **Tracks, albums, artists and playlists** can be edited from the right-click menu or from their page.
 - **Renaming moves the files:** the music folder always follows the tags, as `Artist/Album/Title`. Renaming something to a name that already exists offers to merge the two.
-- **Covers and images** can be changed for tracks, albums, artists and playlists.
+- **Covers and images** can be changed for tracks, albums, artists and playlists, by choosing an image file or by searching YouTube. Above the search, a row of suggestions from other sites: Deezer, iTunes and the Cover Art Archive for albums (and for the album of a track), Deezer, Wikimedia and Fanart.tv for artists. A track's search looks for its music video ("title artist") and its edit window can also reuse the album's cover; an album's looks for covers on YouTube Music; an artist's shows the pictures of the YouTube channels found for their name; a playlist's is a plain video search. The thumbnails are cropped to a square.
 - **Start and end times:** a track can be trimmed to a section of its file.
 - **Delete:** the right-click menu on a track can delete it. The file is moved to the trash and the track leaves the library and its playlists.
 
@@ -41,7 +41,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - GTK 4, libadwaita and PyGObject
 - GStreamer, with the plugins for the audio formats you want to play
 - [mutagen](https://mutagen.readthedocs.io/) and [Pillow](https://python-pillow.org/)
-- yt-dlp (installed by uv) for the YouTube import sources
+- yt-dlp (installed by uv) for the YouTube import sources and the YouTube image search
 - ffmpeg (optional) to convert downloaded audio when importing from YouTube
 
 PyGObject, GTK, libadwaita, GStreamer, mutagen and Pillow are expected to come from your system packages. Melody's virtual environment is created with access to the system site packages so that it can use them.
@@ -90,11 +90,11 @@ Each source is a class in its own file in `src/melody/import_sources/`, describe
 
 ### Build-time features
 
-`src/melody/features.py` holds constants that are fixed when Melody is built. Setting `YOUTUBE_IMPORT_ENABLED` to `False` removes the YouTube sources, and `youtube.py` and the yt-dlp dependency can then be left out of a package altogether.
+`src/melody/features.py` holds constants that are fixed when Melody is built. Setting `YOUTUBE_IMPORT_ENABLED` to `False` removes the YouTube sources, and `youtube.py` and the yt-dlp dependency can then be left out of a package altogether. `YOUTUBE_IMAGE_SEARCH_ENABLED` does the same for the YouTube search in the image picker (which then only offers a file chooser, and a track's album cover): `services/youtube_images.py` can be left out.
 
 ## Notice about downloading
 
-Only import audio you have the right to use. YouTube's terms of service do not allow downloading, and most of the music on it is copyrighted. The YouTube import sources are provided for content you are allowed to download.
+Only import audio you have the right to use. YouTube's terms of service do not allow downloading, and most of the music on it is copyrighted. The YouTube import sources are provided for content you are allowed to download. The same goes for the thumbnails and channel pictures offered when choosing an image: they belong to whoever made them.
 
 ## TODO
 

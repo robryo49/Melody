@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 from io import BytesIO
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 import unicodedata
@@ -1177,5 +1178,243 @@ def get_itunes_album_image(artist: str, album: str) -> bytes | None:
             return _download_image(image_url)
         except (OSError, ValueError, URLError, HTTPError):
             continue
+
+    return None
+
+
+# ----------------------------------------------------------------------
+# YouTube, through yt-dlp (which Melody already uses to import audio)
+# ----------------------------------------------------------------------
+
+def _center_square(data: bytes) -> bytes:
+    """The middle square of an image, as JPEG (a video thumbnail is 16:9)."""
+    with Image.open(BytesIO(data)) as source:
+        image = source.convert("RGB")
+
+    side = min(image.size)
+    left = (image.width - side) // 2
+    top = (image.height - side) // 2
+    image = image.crop((left, top, left + side, top + side))
+
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=92)
+    return output.getvalue()
+
+
+def _youtube_channel_name(entry: dict) -> str:
+    return _normalize_text(entry.get("channel") or entry.get("uploader") or "")
+
+
+def _youtube_cover_videos(entries: list[dict], artist: str) -> list[str]:
+    """Ids of the search results, the likeliest to show the cover first: the
+    uploads of the artist's own "- Topic" channel (YouTube's upload of a
+    release, whose thumbnail is the cover), then those of another "- Topic"
+    channel that has the artist's name in it, then every other result."""
+    expected = _normalize_text(artist)
+    ranked = []
+
+    for position, entry in enumerate(entries):
+        video_id = str(entry.get("id") or "")
+
+        if not re.fullmatch(r"[\w-]{11}", video_id):
+            continue
+
+        name = _youtube_channel_name(entry)
+
+        if name == f"{expected} topic":
+            rank = 0
+        elif name.endswith(" topic") and (
+                expected in name or name[:-len(" topic")] in expected
+        ):
+            rank = 1
+        else:
+            rank = 2
+
+        ranked.append((rank, position, video_id))
+
+    return [video_id for _rank, _position, video_id in sorted(ranked)]
+
+
+def _youtube_artist_channels(entries: list[dict], artist: str) -> list[str]:
+    """Ids of the channels among the search results that are the artist's
+    own: their "- Topic" channel first, then a channel named like them."""
+    expected = _normalize_text(artist)
+    ranked = []
+
+    for entry in entries:
+        channel_id = str(entry.get("channel_id") or "")
+        name = _youtube_channel_name(entry)
+
+        if not channel_id:
+            continue
+
+        if name == f"{expected} topic":
+            ranked.append((0, channel_id))
+        elif name in (expected, f"{expected} vevo", f"{expected} official"):
+            ranked.append((1, channel_id))
+
+    channels = []
+
+    for _rank, channel_id in sorted(ranked, key=lambda pair: pair[0]):
+        if channel_id not in channels:
+            channels.append(channel_id)
+
+    return channels
+
+
+def _youtube_avatar_urls(thumbnails: list[dict] | None) -> list[str]:
+    """The https addresses of a channel's picture, biggest first. The picture
+    is told from the banner by its name, or else by being square."""
+    usable = [
+        thumbnail for thumbnail in thumbnails or []
+        if str(thumbnail.get("url") or "").startswith("https://")
+    ]
+
+    pictures = [t for t in usable if "avatar" in str(t.get("id") or "")]
+
+    if not pictures:
+        pictures = [
+            t for t in usable
+            if t.get("width") and t.get("width") == t.get("height")
+        ]
+
+    pictures.sort(
+        key=lambda t: (t.get("width") or 0, t.get("preference") or 0),
+        reverse=True,
+    )
+    return [str(t["url"]) for t in pictures]
+
+
+def _youtube_search(query: str, limit: int = 8) -> list[dict]:
+    """The videos YouTube finds for ``query``. Only the results page is read,
+    no video is opened. Nothing when yt-dlp is not installed (Melody works
+    without it)."""
+    try:
+        import yt_dlp
+    except ImportError:
+        return []
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "socket_timeout": 20,
+    }
+
+    with yt_dlp.YoutubeDL(options) as searcher:
+        try:
+            info = searcher.extract_info(
+                f"ytsearch{int(limit)}:{query}",
+                download=False,
+            )
+        except Exception as error:
+            # The picker just shows an empty tile for a source that fails:
+            # say why on the console.
+            print(
+                f"YouTube search for {query!r} failed: {error}",
+                file=sys.stderr,
+            )
+            return []
+
+    return [entry for entry in (info or {}).get("entries") or [] if entry]
+
+
+def _youtube_channel_picture(channel_id: str) -> bytes | None:
+    """The picture of a YouTube channel, as a square."""
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+        # Only the channel's details are wanted, not its list of videos.
+        "playlistend": 1,
+        "socket_timeout": 20,
+    }
+
+    with yt_dlp.YoutubeDL(options) as extractor:
+        try:
+            info = extractor.extract_info(
+                f"https://www.youtube.com/channel/{channel_id}",
+                download=False,
+            )
+        except Exception as error:
+            print(
+                f"YouTube channel {channel_id} could not be read: {error}",
+                file=sys.stderr,
+            )
+            return None
+
+    for url in _youtube_avatar_urls((info or {}).get("thumbnails")):
+        try:
+            return _center_square(_download_image(url))
+        except (OSError, ValueError, URLError, HTTPError):
+            continue
+
+    return None
+
+
+def _youtube_thumbnail(video_id: str) -> bytes | None:
+    """The thumbnail of a video, as a square.
+
+    The big one (1280x720) is tried first, then the 320x180 one that every
+    video has. Both are 16:9 with nothing above or below, so their middle
+    square is the cover of a "- Topic" upload; the other sizes have black bars
+    above and below and are not used.
+    """
+    for name in ("maxresdefault", "mqdefault"):
+        try:
+            data = _download_image(
+                f"https://i.ytimg.com/vi/{video_id}/{name}.jpg"
+            )
+            return _center_square(data)
+        except (OSError, ValueError, URLError, HTTPError):
+            continue
+
+    return None
+
+
+def get_youtube_album_image(artist: str, album: str) -> bytes | None:
+    """An album's cover, from the thumbnail of a YouTube video.
+
+    The search is ``artist album``. The uploads of the artist's own "- Topic"
+    channel come first: their thumbnail is the album cover itself. When there
+    is none, the best of the other results is used, so there is nearly always
+    something to offer, even if it is a frame of a video and not the cover.
+    """
+    entries = _youtube_search(f"{artist} {album}")
+
+    for video_id in _youtube_cover_videos(entries, artist):
+        data = _youtube_thumbnail(video_id)
+
+        if data:
+            return data
+
+    return None
+
+
+def get_youtube_artist_image(artist: str) -> bytes | None:
+    """An artist's picture: the picture of their YouTube channel (the "-
+    Topic" one first, which is a portrait more often than not). With no
+    channel of that name, the thumbnail of the top search result, which is
+    usually a video of them."""
+    entries = _youtube_search(artist)
+
+    for channel_id in _youtube_artist_channels(entries, artist):
+        data = _youtube_channel_picture(channel_id)
+
+        if data:
+            return data
+
+    for video_id in _youtube_cover_videos(entries, artist):
+        data = _youtube_thumbnail(video_id)
+
+        if data:
+            return data
 
     return None

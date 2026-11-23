@@ -32,6 +32,9 @@ DEFAULT_COLUMNS = ("title", "album", "artist", "play_count", "duration")
 # artist), so those two columns are left out.
 ALBUM_COLUMNS = ("title", "play_count", "duration")
 
+# The Recent page also says when each track was added.
+RECENT_COLUMNS = ("title", "album", "artist", "added", "play_count", "duration")
+
 # key: (header text, weight, width, fixed). A fixed column is exactly
 # ``width`` wide; the others share what is left in proportion to ``weight``
 # and never get narrower than ``width``.
@@ -39,12 +42,13 @@ _COLUMNS = {
     "title": ("Title", 5, 100, False),
     "album": ("Album", 3, 64, False),
     "artist": ("Artist", 3, 64, False),
+    "added": ("Date Added", 0, 100, True),
     "play_count": ("Play Count", 0, 92, True),
     "duration": ("Duration", 0, 90, True),
 }
 
 # Columns whose first click sorts the biggest value first.
-_DESCENDING_FIRST = {"play_count"}
+_DESCENDING_FIRST = {"play_count", "added"}
 
 _CSS = """
 .track-header-cell {
@@ -117,6 +121,10 @@ def _cell_text(track, key):
     if key == "play_count":
         return str(int(track.get("play_count") or 0))
 
+    if key == "added":
+        # "YYYY-MM-DD HH:MM:SS": the day is enough.
+        return str(track.get("added_at") or "")[:10]
+
     return format_duration(track_length(track))
 
 
@@ -129,6 +137,8 @@ _SORT_KEYS = {
     "album": lambda track: str(track.get("album") or "").casefold(),
     "artist": lambda track: str(track.get("artist") or "").casefold(),
     "play_count": lambda track: int(track.get("play_count") or 0),
+    # The date and time are written so that text order is date order.
+    "added": lambda track: str(track.get("added_at") or ""),
     "duration": lambda track: track_length(track),
 }
 

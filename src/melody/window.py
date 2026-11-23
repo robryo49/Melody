@@ -36,12 +36,17 @@ from melody.services.artwork import (
     get_track_artwork_bytes,
 )
 from melody.services.library_scanner import _sanitize_name
-from melody.services.image_sources import album_sources, artist_sources
+from melody.services.image_sources import (
+    album_search,
+    artist_search,
+    playlist_search,
+)
 from melody.services.playlist_artwork import (
     get_playlist_cover,
     set_playlist_cover,
 )
 from melody.services.playback_manager import PlaybackManager
+from melody.services.recent_tracks import select_recent_tracks
 from melody.services.mpris import MprisService
 from melody.views import (
     LibraryView,
@@ -66,7 +71,11 @@ from melody.widgets.import_dialogs import (
     show_search_dialog,
 )
 from melody.widgets.player_bar import PlayerBar
-from melody.widgets.track_table import set_favorite_handler
+from melody.widgets.track_table import (
+    RECENT_COLUMNS,
+    TrackSort,
+    set_favorite_handler,
+)
 
 
 class MelodyWindow(Adw.ApplicationWindow):
@@ -123,15 +132,29 @@ class MelodyWindow(Adw.ApplicationWindow):
                 empty_icon="emblem-favorite-symbolic",
                 track_filter=lambda track: bool(track.get("favorite")),
             ),
+            "Recent": LibraryView(
+                title="Recent",
+                noun="track",
+                search_placeholder="Search recent tracks…",
+                empty_title="No recent tracks",
+                empty_description=(
+                    "Tracks you add to your library show up here."
+                ),
+                empty_icon="document-open-recent-symbolic",
+                select_tracks=self._select_recent_tracks,
+                columns=RECENT_COLUMNS,
+                # Newest first, until a column name is clicked.
+                initial_sort=TrackSort("added", True),
+            ),
             "Albums": AlbumsView(),
             "Artists": ArtistsView(),
             "Playlists": PlaylistsView(),
         }
 
-        for name in ("Library", "Compilations", "Favorites", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Albums", "Artists"):
             self.views[name].set_playback_manager(self.playback_manager)
 
-        for name in ("Library", "Compilations", "Favorites", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Albums", "Artists"):
             self.views[name].set_context_actions(
                 self._edit_track,
                 self._choose_playlist_for_track,
@@ -247,6 +270,7 @@ class MelodyWindow(Adw.ApplicationWindow):
             # Only shown while compilations are enabled.
             ("Compilations", "media-playlist-consecutive-symbolic"),
             ("Favorites", "emblem-favorite-symbolic"),
+            ("Recent", "document-open-recent-symbolic"),
             ("Albums", "media-optical-symbolic"),
             ("Artists", "system-users-symbolic"),
             ("Playlists", "view-list-symbolic"),
@@ -432,6 +456,11 @@ class MelodyWindow(Adw.ApplicationWindow):
             if update is not None:
                 update(track["id"], count)
 
+    def _select_recent_tracks(self, tracks):
+        """The tracks of the Recent page among ``tracks``: as many as the
+        settings say, newest first."""
+        return select_recent_tracks(tracks, self.settings)
+
     def _toggle_favorite(self, track):
         """A click on a track's heart: mark it as a favorite, or take the mark
         away."""
@@ -488,7 +517,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         # Which tracks go where depends on the settings: sort them out again.
         self._update_compilations_ui()
 
-        for name in ("Library", "Compilations", "Favorites", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Albums", "Artists"):
             self.views[name].set_tracks(self.tracks)
 
     def _on_navigation_selected(self, list_box, row):
@@ -626,6 +655,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Library"].set_tracks(tracks)
         self.views["Compilations"].set_tracks(tracks)
         self.views["Favorites"].set_tracks(tracks)
+        self.views["Recent"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(
@@ -740,6 +770,8 @@ class MelodyWindow(Adw.ApplicationWindow):
         elif kind == "list":
             if source["key"] == self.views["Favorites"].title:
                 page = "Favorites"
+            elif source["key"] == self.views["Recent"].title:
+                page = "Recent"
             else:
                 page = (
                     "Compilations"
@@ -1205,11 +1237,12 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _change_playlist_image(self, playlist):
         """The edit button over a playlist's picture: pick, then apply right
-        away (there is no Save step outside the edit window). A playlist has
-        no suggestions: the person picks an image file."""
+        away (there is no Save step outside the edit window). A playlist's
+        name says nothing about what it should look like, so the person
+        searches YouTube for what they want, or picks an image file."""
         show_image_picker(
             self,
-            [],
+            playlist_search(),
             lambda data: self._apply_playlist_image(playlist, data),
         )
 
@@ -1349,7 +1382,7 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         show_image_picker(
             self,
-            album_sources(album["artist"], album["title"]),
+            album_search(album["artist"], album["title"]),
             lambda data: self._apply_album_image(album, data),
         )
 
@@ -1374,7 +1407,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         """The edit button over an artist's picture (see above)."""
         show_image_picker(
             self,
-            artist_sources(artist["name"]),
+            artist_search(artist["name"]),
             lambda data: self._apply_artist_image(artist, data),
         )
 
@@ -1644,6 +1677,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Library"].set_tracks(tracks)
         self.views["Compilations"].set_tracks(tracks)
         self.views["Favorites"].set_tracks(tracks)
+        self.views["Recent"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)

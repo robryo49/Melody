@@ -1,28 +1,87 @@
-"""Where the image picker looks for suggestions.
+"""Where the image picker gets its images.
 
-Each ``ImageSource`` is one place an image can come from. ``loader()`` does
-the (slow, network) work and returns the full-size image bytes, or ``None``
-when that source has nothing; it is always run in a background thread.
+The picker (``widgets/image_picker.py``) offers up to three ways to choose an
+image:
 
-The lists below always have the same number of sources for a given kind of
-image: a source with nothing to offer just returns ``None``, and the picker
-shows a placeholder for it.
+* a file on this computer (always);
+* a one-click shortcut, for a track: the cover of its album, if the library
+  already has one (``ImageSearch.shortcut``);
+* a search on YouTube, whose results are thumbnails to pick from.
+
+What is searched for depends on what the image is for, so each kind has a
+function that builds the ``ImageSearch`` the picker runs: ``track_search``,
+``album_search``, ``artist_search`` and ``playlist_search``. The searching
+itself is in ``youtube_images.py``.
+
+Everything that fetches something blocks: the picker runs it in threads.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from melody.features import YOUTUBE_IMAGE_SEARCH_ENABLED
 from melody.services import artwork
+
+
+class ImageSearchError(Exception):
+    """A search failed; the message is meant to be shown as it is."""
 
 
 @dataclass
 class ImageSource:
+    """One image that can be had in a single step (see
+    ``library_album_source``). ``loader()`` returns the full-size image bytes,
+    or ``None`` when there is nothing."""
+
     name: str
     loader: Callable[[], bytes | None]
     detail: str = ""
+
+
+@dataclass
+class ImageResult:
+    """One result of a search: a picture to show, and the picture to use.
+
+    ``load_thumbnail()`` returns an image to show in the list of results (any
+    shape: the picker crops it to a square). ``load_full()`` returns the
+    image to use once the person has picked it, as big as it can be. Both
+    return ``None`` (or raise) when the picture cannot be had; the picker then
+    leaves the result out.
+    """
+
+    title: str
+    load_thumbnail: Callable[[], bytes | None]
+    load_full: Callable[[], bytes | None]
+    detail: str = ""
+
+
+@dataclass
+class ImageSearch:
+    """What the picker searches for.
+
+    ``query`` is what the search bar starts with: when it is not empty the
+    search is run as soon as the picker opens. ``search(query)`` returns the
+    results, or raises ``ImageSearchError``; it is ``None`` when this build has
+    no search (see ``melody.features``), and the picker then only offers the
+    file chooser and the shortcut.
+
+    ``hint`` says in a few words what the search looks for. ``suggestions``
+    are images fetched from other sites (Deezer, iTunes...), shown as tiles
+    above the search. ``shortcut`` is a one-click image (shown as a button,
+    labelled ``shortcut_label``), and ``dedupe`` hides results whose pictures
+    look the same (the songs of one album all show its cover).
+    """
+
+    query: str = ""
+    search: Callable[[str], list[ImageResult]] | None = None
+    hint: str = ""
+    suggestions: list[ImageSource] = field(default_factory=list)
+    shortcut: ImageSource | None = None
+    shortcut_label: str = "Use album cover"
+    dedupe: bool = False
 
 
 def _is_unknown(value: str) -> bool:
@@ -31,6 +90,13 @@ def _is_unknown(value: str) -> bool:
         "unknown artist",
         "unknown album",
         "various artists",
+    )
+
+
+def _words(*parts: str) -> str:
+    """The non-empty ``parts`` joined with spaces."""
+    return " ".join(
+        part.strip() for part in parts if part and part.strip()
     )
 
 
@@ -48,7 +114,7 @@ def artist_sources(artist: str) -> list[ImageSource]:
     """Artist portraits: Deezer, Wikimedia Commons and Fanart.tv.
 
     Fanart.tv needs an API key (``MELODY_FANART_API_KEY``); without one it
-    never has anything to offer.
+    never has anything to offer, and the picker shows a placeholder.
     """
     artist = (artist or "").strip()
 
@@ -102,6 +168,102 @@ def album_sources(artist: str, album: str) -> list[ImageSource]:
             ),
         ),
     ]
+
+
+def _youtube(name: str):
+    """The function ``name`` of ``youtube_images``, or ``None`` when this
+    build leaves the YouTube search out."""
+    if not YOUTUBE_IMAGE_SEARCH_ENABLED:
+        return None
+
+    try:
+        from melody.services import youtube_images
+    except ModuleNotFoundError as error:
+        if error.name != "melody.services.youtube_images":
+            raise
+
+        return None
+
+    return getattr(youtube_images, name)
+
+
+def track_search(
+        title: str,
+        artist: str,
+        album: str = "",
+        library_tracks=(),
+) -> ImageSearch:
+    """Images for a track: the thumbnails of its music video on YouTube,
+    searched as "title artist", and the cover of its album.
+
+    The values are those in the edit window, not the track's own: they may
+    have been changed there without being saved yet. The album artist is
+    always the artist typed in the window. A single has no album, so there is
+    no album cover to borrow.
+    """
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+
+    shortcut = (
+        library_album_source(list(library_tracks), artist, album)
+        if album and not _is_unknown(album)
+        else None
+    )
+
+    return ImageSearch(
+        query=_words(title, "" if _is_unknown(artist) else artist),
+        search=_youtube("search_music_videos"),
+        hint="Music videos on YouTube",
+        suggestions=(
+            album_sources(artist, album)
+            if album and not _is_unknown(album)
+            else []
+        ),
+        shortcut=shortcut,
+    )
+
+
+def album_search(artist: str, album: str) -> ImageSearch:
+    """Images for an album: covers found on YouTube Music, searched as
+    "artist album"."""
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+
+    return ImageSearch(
+        query=(
+            ""
+            if _is_unknown(album)
+            else _words("" if _is_unknown(artist) else artist, album)
+        ),
+        search=_youtube("search_album_covers"),
+        hint="Album covers on YouTube Music",
+        suggestions=album_sources(artist, album),
+        dedupe=True,
+    )
+
+
+def artist_search(name: str) -> ImageSearch:
+    """Images for an artist: the pictures of the YouTube channels found for
+    their name."""
+    name = (name or "").strip()
+
+    return ImageSearch(
+        query="" if _is_unknown(name) else name,
+        search=_youtube("search_artist_pictures"),
+        hint="YouTube channel pictures",
+        suggestions=artist_sources(name),
+    )
+
+
+def playlist_search() -> ImageSearch:
+    """Images for a playlist: the thumbnails of whatever videos the person
+    searches for (a playlist's name says nothing about what it should look
+    like, so nothing is searched until they ask)."""
+    return ImageSearch(
+        query="",
+        search=_youtube("search_videos"),
+        hint="Videos on YouTube",
+    )
 
 
 def library_album_source(
@@ -158,36 +320,3 @@ def library_album_source(
         load,
         f"“{title}”" if title else "",
     )
-
-
-def playlist_sources(tracks: list[dict], limit: int = 4) -> list[ImageSource]:
-    """The covers of the albums a playlist's tracks come from.
-
-    ``tracks`` are the playlist's tracks (as the library has them). Each
-    album counts once, in the order its first track appears, up to
-    ``limit``. A single has no album, so it has no cover to offer.
-    """
-    sources = []
-    seen = set()
-
-    for track in tracks:
-        album = str(track.get("album") or "").strip()
-
-        if not album:
-            continue
-
-        artist = str(
-            track.get("album_artist") or track.get("artist") or ""
-        ).strip()
-        key = (artist.casefold(), album.casefold())
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        sources.append(library_album_source(tracks, artist, album))
-
-        if len(sources) == limit:
-            break
-
-    return sources

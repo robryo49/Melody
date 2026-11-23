@@ -25,6 +25,7 @@ from melody.services.collection_actions import (
 )
 from melody.widgets.link_label import make_link
 from melody.widgets.track_table import (
+    DEFAULT_COLUMNS,
     TrackSort,
     TrackTableHeader,
     create_track_row,
@@ -51,6 +52,9 @@ class LibraryView(Gtk.Box):
             empty_description="Add music to your library to get started.",
             empty_icon="folder-music-symbolic",
             track_filter=None,
+            select_tracks=None,
+            columns=DEFAULT_COLUMNS,
+            initial_sort=None,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -63,6 +67,11 @@ class LibraryView(Gtk.Box):
         self._empty_description = empty_description
         self._empty_icon = empty_icon
         self._track_filter = track_filter
+        # ``select_tracks(tracks)`` picks the page's tracks among all those
+        # that pass the filter, for a choice that depends on the others (the
+        # N most recent). ``columns`` are the ones the table shows.
+        self._select_tracks = select_tracks
+        self._columns = columns
 
         self.tracks = []
         # What the list shows right now, filtered and in its sort order: the
@@ -73,7 +82,7 @@ class LibraryView(Gtk.Box):
         self._edit_track = None
         self._choose_playlist = None
         # The column the list is sorted by (clicked in the header above it).
-        self.track_sort = TrackSort()
+        self.track_sort = initial_sort or TrackSort()
 
         self._build_header()
         self._build_list()
@@ -242,6 +251,7 @@ class LibraryView(Gtk.Box):
         self.track_header = TrackTableHeader(
             self.track_sort,
             self._refresh_list,
+            columns=self._columns,
             with_artwork=True,
             margin_start=24,
             margin_end=0,
@@ -552,6 +562,7 @@ class LibraryView(Gtk.Box):
 
         row = create_track_row(
             track,
+            columns=self._columns,
             artwork=artwork,
             vertical_margin=6,
         )
@@ -778,6 +789,10 @@ class LibraryView(Gtk.Box):
             track for track in tracks
             if self._track_filter is None or self._track_filter(track)
         ]
+
+        if self._select_tracks is not None:
+            self.tracks = self._select_tracks(self.tracks)
+
         self._refresh_list()
 
     def _update_view(self):

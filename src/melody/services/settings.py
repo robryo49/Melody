@@ -12,6 +12,11 @@ DEFAULTS = {
     "compilation_threshold": 900.0,
     # Also list compilations in the album their file belongs to.
     "show_compilations_in_albums": False,
+    # What the Recent page shows: the tracks added in the last N days (True)
+    # or the N most recently added tracks (False).
+    "recent_by_days": True,
+    "recent_days": 30.0,
+    "recent_count": 50.0,
 }
 
 
@@ -119,6 +124,30 @@ class Settings:
     @show_compilations_in_albums.setter
     def show_compilations_in_albums(self, value):
         self.set("show_compilations_in_albums", value)
+
+    @property
+    def recent_by_days(self) -> bool:
+        return self._values["recent_by_days"]
+
+    @recent_by_days.setter
+    def recent_by_days(self, value):
+        self.set("recent_by_days", value)
+
+    @property
+    def recent_days(self) -> float:
+        return self._values["recent_days"]
+
+    @recent_days.setter
+    def recent_days(self, value):
+        self.set("recent_days", value)
+
+    @property
+    def recent_count(self) -> float:
+        return self._values["recent_count"]
+
+    @recent_count.setter
+    def recent_count(self, value):
+        self.set("recent_count", value)
 
 
 _settings = None
