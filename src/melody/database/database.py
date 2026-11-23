@@ -91,6 +91,16 @@ class Database:
                                )
                                """)
 
+            playlist_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(playlists)")
+            }
+
+            if "rules" not in playlist_columns:
+                # NULL for a normal playlist. For an automatic one: its rules
+                # as JSON (see services/automatic_playlists.py).
+                connection.execute("ALTER TABLE playlists ADD COLUMN rules TEXT")
+
             connection.execute("""
                                CREATE TABLE IF NOT EXISTS playlist_tracks (
                                                                               playlist_id TEXT NOT NULL,
@@ -412,6 +422,104 @@ class Database:
         exists once a picture has been chosen)."""
         return self.path.parent / "playlist-covers" / f"{playlist_id}.png"
 
+    def create_automatic_playlist(self, name: str, rules: dict) -> str:
+        """Create an automatic playlist: it has no tracks of its own, and lists
+        the library's tracks that ``rules`` select (see
+        services/automatic_playlists.py).
+
+        Raises ``ValueError`` if the name is empty or the rules make no sense.
+        """
+        from melody.services.automatic_playlists import dumps_rules
+
+        name = name.strip()
+        if not name:
+            raise ValueError("A playlist name cannot be empty")
+
+        rules_text = dumps_rules(rules)
+        playlist_id = str(uuid.uuid4())
+
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO playlists (id, name, rules) VALUES (?, ?, ?)",
+                (playlist_id, name, rules_text),
+            )
+
+        return playlist_id
+
+    def set_playlist_rules(self, playlist_id: str, rules: dict):
+        """Change the rules of an automatic playlist."""
+        from melody.services.automatic_playlists import dumps_rules
+
+        rules_text = dumps_rules(rules)
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT rules FROM playlists WHERE id = ?",
+                (playlist_id,),
+            ).fetchone()
+
+            if row is None:
+                raise KeyError(f"Playlist does not exist: {playlist_id}")
+
+            if row["rules"] is None:
+                raise ValueError("Only an automatic playlist has rules")
+
+            connection.execute("""
+                               UPDATE playlists
+                               SET rules = ?, modified_at = CURRENT_TIMESTAMP
+                               WHERE id = ?
+                               """, (rules_text, playlist_id))
+
+    @staticmethod
+    def _require_manual(connection, playlist_id):
+        """Refuse to add tracks to, or remove them from, an automatic
+        playlist: its tracks come from its rules."""
+        row = connection.execute(
+            "SELECT rules FROM playlists WHERE id = ?",
+            (playlist_id,),
+        ).fetchone()
+
+        if row is not None and row["rules"] is not None:
+            raise ValueError(
+                "The tracks of an automatic playlist come from its rules"
+            )
+
+    def _playlists_from_rows(self, rows):
+        """Playlist dicts from database rows.
+
+        An automatic playlist gets ``automatic`` True, its rules as a dict and
+        the number of tracks they select right now. A normal playlist has
+        ``automatic`` False and ``rules`` None.
+        """
+        from melody.services.automatic_playlists import (
+            evaluate_rules,
+            loads_rules,
+        )
+
+        playlists = []
+        library = None
+
+        for row in rows:
+            playlist = dict(row)
+            text = playlist.get("rules")
+            playlist["automatic"] = text is not None
+
+            if text is None:
+                playlist["rules"] = None
+            else:
+                playlist["rules"] = loads_rules(text)
+
+                if library is None:
+                    library = self.get_tracks()
+
+                playlist["track_count"] = len(
+                    evaluate_rules(playlist["rules"], library)
+                )
+
+            playlists.append(playlist)
+
+        return playlists
+
     def get_playlists(self):
         with self._connect() as connection:
             rows = connection.execute("""
@@ -422,7 +530,7 @@ class Database:
                                       ORDER BY p.name COLLATE NOCASE
                                       """).fetchall()
 
-        return [dict(row) for row in rows]
+        return self._playlists_from_rows(rows)
 
     def get_playlist(self, playlist_id: str):
         with self._connect() as connection:
@@ -434,10 +542,12 @@ class Database:
                                      GROUP BY p.id
                                      """, (playlist_id,)).fetchone()
 
-        return dict(row) if row else None
+        return self._playlists_from_rows([row])[0] if row else None
 
     def add_track_to_playlist(self, playlist_id: str, track_id: str):
         with self._connect() as connection:
+            self._require_manual(connection, playlist_id)
+
             position = connection.execute("""
                                           SELECT COALESCE(MAX(position), -1) + 1
                                           FROM playlist_tracks
@@ -463,6 +573,8 @@ class Database:
 
     def remove_track_from_playlist(self, playlist_id: str, track_id: str):
         with self._connect() as connection:
+            self._require_manual(connection, playlist_id)
+
             connection.execute("""
                                DELETE FROM playlist_tracks
                                WHERE playlist_id = ? AND track_id = ?
@@ -476,12 +588,29 @@ class Database:
 
     def get_playlist_tracks(self, playlist_id: str):
         with self._connect() as connection:
-            rows = connection.execute("""
-                                      SELECT t.*
-                                      FROM tracks t
-                                               JOIN playlist_tracks pt ON pt.track_id = t.id
-                                      WHERE pt.playlist_id = ?
-                                      ORDER BY pt.position, t.title COLLATE NOCASE
-                                      """, (playlist_id,)).fetchall()
+            row = connection.execute(
+                "SELECT rules FROM playlists WHERE id = ?",
+                (playlist_id,),
+            ).fetchone()
+            rules_text = row["rules"] if row is not None else None
+
+            if rules_text is None:
+                rows = connection.execute("""
+                                          SELECT t.*
+                                          FROM tracks t
+                                                   JOIN playlist_tracks pt ON pt.track_id = t.id
+                                          WHERE pt.playlist_id = ?
+                                          ORDER BY pt.position, t.title COLLATE NOCASE
+                                          """, (playlist_id,)).fetchall()
+
+        if rules_text is not None:
+            # An automatic playlist has no stored tracks: the rules pick them
+            # from the library as it is now.
+            from melody.services.automatic_playlists import (
+                evaluate_rules,
+                loads_rules,
+            )
+
+            return evaluate_rules(loads_rules(rules_text), self.get_tracks())
 
         return [dict(row) for row in rows]

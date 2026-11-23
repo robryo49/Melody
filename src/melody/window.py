@@ -55,6 +55,9 @@ from melody.services.settings import get_settings
 from melody.import_sources import get_import_sources
 from melody.services.metadata import MetadataError
 from melody.widgets.image_picker import show_image_picker
+from melody.widgets.automatic_playlist_dialog import (
+    show_automatic_playlist_dialog,
+)
 from melody.widgets.import_dialogs import (
     pick_audio_files,
     show_import_dialog,
@@ -187,6 +190,9 @@ class MelodyWindow(Adw.ApplicationWindow):
             self._choose_playlist_for_track,
             self._edit_track,
         )
+        self.views["Playlists"].set_automatic_callback(
+            self._create_automatic_playlist,
+        )
         self.views["Playlists"].set_image_callback(
             self._change_playlist_image,
         )
@@ -248,6 +254,30 @@ class MelodyWindow(Adw.ApplicationWindow):
             row = self._create_navigation_row(name, icon)
             self.navigation_rows[name] = row
             self.navigation_list.append(row)
+
+        # A line before Albums and before Playlists splits the pages into
+        # three groups: the tracks (Library, Compilations, Favorites), the
+        # collections (Albums, Artists) and the Playlists.
+        group_starts = (
+            self.navigation_rows["Albums"],
+            self.navigation_rows["Playlists"],
+        )
+
+        def update_header(row, _before):
+            if row in group_starts:
+                if row.get_header() is None:
+                    separator = Gtk.Separator(
+                        orientation=Gtk.Orientation.HORIZONTAL,
+                    )
+                    separator.set_margin_top(6)
+                    separator.set_margin_bottom(6)
+                    separator.set_margin_start(12)
+                    separator.set_margin_end(12)
+                    row.set_header(separator)
+            else:
+                row.set_header(None)
+
+        self.navigation_list.set_header_func(update_header)
 
         sidebar.append(self.navigation_list)
 
@@ -476,6 +506,11 @@ class MelodyWindow(Adw.ApplicationWindow):
             Gtk.Label(label=name)
         )
 
+        if name == "Playlists":
+            # Plays, favorites and imports since the page was last shown may
+            # have changed what the automatic playlists select.
+            self.views["Playlists"].refresh_automatic()
+
         if name in self.navigation_rows:
             self.navigation_list.select_row(
                 self.navigation_rows[name]
@@ -632,9 +667,12 @@ class MelodyWindow(Adw.ApplicationWindow):
             show_error_dialog(self, "Could not add track", error)
 
     def _choose_playlist_for_track(self, track, exclude_playlist_id=None):
+        # An automatic playlist takes no track by hand (its rules pick them),
+        # so it is not offered.
         playlists = [
             playlist for playlist in self.database.get_playlists()
             if playlist["id"] != exclude_playlist_id
+            and not playlist.get("automatic")
         ]
         show_playlist_picker_dialog(
             self,
@@ -689,6 +727,9 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         if kind == "playlist":
             page = "Playlists"
+            # Shown first: showing the page refreshes the automatic playlists,
+            # which would rebuild the rows the view is about to scroll to.
+            self._select_page(page)
             shown = self.views[page].view_playlist(source["key"], track)
         elif kind == "album":
             page = "Albums"
@@ -1093,7 +1134,46 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         show_text_dialog(self, "Create playlist", "Choose a name for the new playlist.", "", create)
 
+    def _create_automatic_playlist(self):
+        def save(name, rules):
+            try:
+                playlist_id = self.database.create_automatic_playlist(
+                    name, rules,
+                )
+            except Exception as error:
+                show_error_dialog(self, "Could not create playlist", error)
+                return
+
+            self.views["Playlists"].refresh()
+            playlist = self.database.get_playlist(playlist_id)
+
+            if playlist:
+                self.views["Playlists"]._show_playlist(playlist)
+
+        show_automatic_playlist_dialog(self, None, self.tracks, save)
+
+    def _edit_automatic_playlist(self, playlist):
+        """Change the name and the rules of an automatic playlist. Its picture
+        is changed like any playlist's, with the edit button over its cover."""
+        def save(name, rules):
+            try:
+                if name != playlist["name"]:
+                    self.database.rename_playlist(playlist["id"], name)
+
+                self.database.set_playlist_rules(playlist["id"], rules)
+            except Exception as error:
+                show_error_dialog(self, "Could not edit playlist", error)
+                return
+
+            self.views["Playlists"].refresh()
+
+        show_automatic_playlist_dialog(self, playlist, self.tracks, save)
+
     def _edit_playlist(self, playlist):
+        if playlist.get("automatic"):
+            self._edit_automatic_playlist(playlist)
+            return
+
         def save(values):
             image = values.get("image")
 

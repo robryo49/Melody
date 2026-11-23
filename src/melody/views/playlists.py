@@ -5,6 +5,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk, Pango
 
+from melody.services.automatic_playlists import describe_rules
 from melody.services.collection_actions import (
     attach_track_context_menu,
     is_playback_source,
@@ -45,6 +46,7 @@ class PlaylistsView(Gtk.Box):
         self.track_sort = TrackSort()
 
         self.on_create_playlist = None
+        self.on_create_automatic = None
         self.on_rename_playlist = None
         self.on_add_to_playlist = None
         self.on_edit_track = None
@@ -89,6 +91,10 @@ class PlaylistsView(Gtk.Box):
         self.on_rename_playlist = rename_playlist
         self.on_add_to_playlist = add_to_playlist
         self.on_edit_track = edit_track
+
+    def set_automatic_callback(self, create_automatic_playlist):
+        """``callback()`` opens the window to make an automatic playlist."""
+        self.on_create_automatic = create_automatic_playlist
 
     def set_import_callback(self, callback):
         """``callback(context)`` imports music from a playlist's page; the
@@ -143,9 +149,9 @@ class PlaylistsView(Gtk.Box):
         self.count_label = Gtk.Label(label="0 playlists")
         self.count_label.add_css_class("dim-label")
 
-        create_button = Gtk.Button.new_from_icon_name("list-add-symbolic")
-        create_button.set_tooltip_text("Create playlist")
-        create_button.connect("clicked", self._on_create_clicked)
+        # Making a playlist: one with tracks picked by hand, or an automatic
+        # one defined by rules.
+        create_button = self._create_add_menu_button()
 
         header.append(title)
         header.append(self.count_label)
@@ -155,6 +161,36 @@ class PlaylistsView(Gtk.Box):
         # grid never starts flush against the bottom of the search bar.
         header.set_margin_bottom(12)
         self.grid_header = header
+
+    def _create_add_menu_button(self):
+        """The + button of the header: a small menu to pick the kind of
+        playlist to make."""
+        popover = Gtk.Popover()
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        for label, callback in (
+                ("New playlist", self._on_create_clicked),
+                ("New automatic playlist", self._on_create_automatic_clicked),
+        ):
+            button = Gtk.Button()
+            button.set_has_frame(False)
+            button.add_css_class("flat")
+            button.set_child(Gtk.Label(label=label, xalign=0))
+
+            def activate(_button, callback=callback):
+                popover.popdown()
+                callback(None)
+
+            button.connect("clicked", activate)
+            menu.append(button)
+
+        popover.set_child(menu)
+
+        menu_button = Gtk.MenuButton()
+        menu_button.set_icon_name("list-add-symbolic")
+        menu_button.set_tooltip_text("Create playlist")
+        menu_button.set_popover(popover)
+        return menu_button
 
     def _build_grid(self):
         self.grid = CollectionGrid(
@@ -175,7 +211,24 @@ class PlaylistsView(Gtk.Box):
         empty_create_button.add_css_class("suggested-action")
         empty_create_button.set_halign(Gtk.Align.CENTER)
         empty_create_button.connect("clicked", self._on_create_clicked)
-        self.empty_page.set_child(empty_create_button)
+
+        empty_automatic_button = Gtk.Button(
+            label="Create automatic playlist"
+        )
+        empty_automatic_button.add_css_class("pill")
+        empty_automatic_button.set_halign(Gtk.Align.CENTER)
+        empty_automatic_button.connect(
+            "clicked",
+            self._on_create_automatic_clicked,
+        )
+
+        empty_buttons = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+        )
+        empty_buttons.append(empty_create_button)
+        empty_buttons.append(empty_automatic_button)
+        self.empty_page.set_child(empty_buttons)
 
         self.grid_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid_page.append(self.grid_header)
@@ -277,9 +330,16 @@ class PlaylistsView(Gtk.Box):
 
     def _describe_playlist(self, playlist):
         count = playlist.get("track_count", 0)
+        subtitle = f"{count} track{'s' if count != 1 else ''}"
+
+        # An automatic playlist says so, so it is not mistaken for one whose
+        # tracks were picked by hand.
+        if playlist.get("automatic"):
+            subtitle += " \u2022 Automatic"
+
         return (
             playlist["name"],
-            f"{count} track{'s' if count != 1 else ''}",
+            subtitle,
             self._playlist_covers.get(playlist["id"]),
         )
 
@@ -343,6 +403,12 @@ class PlaylistsView(Gtk.Box):
         self.track_count_label = Gtk.Label(xalign=0)
         self.track_count_label.add_css_class("dim-label")
 
+        # What an automatic playlist selects, in words (hidden for a normal
+        # playlist).
+        self.rules_label = Gtk.Label(xalign=0)
+        self.rules_label.set_wrap(True)
+        self.rules_label.set_visible(False)
+
         self.details_play_button = Gtk.Button(label="Play")
         self.details_play_button.set_halign(Gtk.Align.START)
         self.details_play_button.connect("clicked", self._on_play_clicked)
@@ -358,15 +424,20 @@ class PlaylistsView(Gtk.Box):
         delete_button.add_css_class("destructive-action")
         delete_button.connect("clicked", self._on_delete_clicked)
 
+        # Importing adds tracks to the playlist by hand, which an automatic
+        # playlist does not take (see ``_show_playlist``).
+        self.import_button = create_import_button(self._on_import_clicked)
+
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         actions.set_halign(Gtk.Align.START)
         actions.append(self.details_play_button)
         actions.append(edit_button)
-        actions.append(create_import_button(self._on_import_clicked))
+        actions.append(self.import_button)
         actions.append(delete_button)
 
         labels.append(self.name_label)
         labels.append(self.track_count_label)
+        labels.append(self.rules_label)
         labels.append(actions)
 
         info.append(
@@ -432,11 +503,23 @@ class PlaylistsView(Gtk.Box):
 
         self.current_tracks = tracks
 
-        self.details_heading.set_text("Playlist")
+        automatic = bool(playlist.get("automatic"))
+
+        self.details_heading.set_text(
+            "Automatic playlist" if automatic else "Playlist"
+        )
         self.name_label.set_text(playlist["name"])
         self.track_count_label.set_text(
             f"{len(tracks)} track{'s' if len(tracks) != 1 else ''}"
         )
+
+        # An automatic playlist shows its rules, and has no tracks to add by
+        # hand: its contents follow the library.
+        self.rules_label.set_visible(automatic)
+        self.import_button.set_visible(not automatic)
+
+        if automatic:
+            self.rules_label.set_text(describe_rules(playlist["rules"]))
 
         first = tracks[0] if tracks else None
         artwork_path = (
@@ -461,6 +544,15 @@ class PlaylistsView(Gtk.Box):
 
         if self.on_edit_track is not None:
             playlist_id = self.current_playlist["id"]
+
+            # The tracks of an automatic playlist come from its rules, so
+            # none can be taken out by hand.
+            remove = (
+                None
+                if self.current_playlist.get("automatic")
+                else lambda t: self._remove_track(playlist_id, t)
+            )
+
             attach_track_context_menu(
                 row,
                 track,
@@ -470,9 +562,7 @@ class PlaylistsView(Gtk.Box):
                 on_add_to_playlist=lambda t: self.on_add_to_playlist(
                     t, exclude_playlist_id=playlist_id
                 ),
-                on_remove_from_playlist=lambda t: self._remove_track(
-                    playlist_id, t
-                ),
+                on_remove_from_playlist=remove,
             )
 
         return row
@@ -686,6 +776,10 @@ class PlaylistsView(Gtk.Box):
         if self.on_create_playlist is not None:
             self.on_create_playlist()
 
+    def _on_create_automatic_clicked(self, button):
+        if self.on_create_automatic is not None:
+            self.on_create_automatic()
+
     def _on_rename_clicked(self):
         if (
                 self.current_playlist is not None
@@ -707,6 +801,13 @@ class PlaylistsView(Gtk.Box):
     # ------------------------------------------------------------------
     # Navigation and sorting
     # ------------------------------------------------------------------
+
+    def refresh_automatic(self):
+        """Bring the automatic playlists up to date: what they select changes
+        as tracks are played, marked as favorites, added or edited. Does
+        nothing when there is none."""
+        if any(playlist.get("automatic") for playlist in self.playlists):
+            self.refresh()
 
     def update_play_count(self, track_id, count):
         """A track was played once more: update its row in the playlist's
