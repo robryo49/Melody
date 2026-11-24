@@ -52,6 +52,7 @@ from melody.services.playback_manager import PlaybackManager
 from melody.services.recent_tracks import select_recent_tracks
 from melody.services.most_played_tracks import select_most_played_tracks
 from melody.services.mpris import MprisService
+from melody.services.keyboard_shortcuts import KeyboardShortcuts
 from melody.views import (
     LibraryView,
     AlbumsView,
@@ -315,6 +316,15 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self.set_content(self.navigation)
         self.connect("close-request", self._on_close_request)
+
+        # Space, the arrows, M, S and R control the player (see
+        # ``keyboard_shortcuts``). The player bar exists by now: it is made
+        # with the content above.
+        self.shortcuts = KeyboardShortcuts(
+            self,
+            self.playback_manager,
+            self.player_bar,
+        )
 
         self._update_compilations_ui()
         self.settings.connect_changed(self._on_settings_changed)

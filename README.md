@@ -38,6 +38,22 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Playing queue page:** under Search in the sidebar, it lists the track being played and everything after it. Double-click a track to play from there, right-click to play it, move it to right after the current track or remove it, and use Clear to empty everything after the current track.
 - Desktop integration through MPRIS: media keys, the shell's media widget and tools such as `playerctl` can show what is playing and control play, pause, next, previous, seek, shuffle, repeat and volume.
 
+### Keyboard shortcuts
+
+These work from anywhere in the main window:
+
+| Key | Action |
+| --- | --- |
+| Space | Play or pause (with nothing loaded, plays the selected track) |
+| Left / Right | Seek 5 seconds back / forward |
+| Up / Down | Raise / lower Melody's volume (not the system's) |
+| Ctrl+Left / Ctrl+Right | Previous / next track |
+| M | Mute, or bring the volume back |
+| S | Shuffle on / off |
+| R | Repeat: off, all, one |
+
+The keyboard's media keys (play / pause, next, previous, stop) work as well. The shortcuts are left alone while you type in a text field, use a menu or have a dialog open. Because the arrows and Space are caught before the focused widget sees them, they do not move through lists any more.
+
 ## Requirements
 
 - Python 3.14 or newer
@@ -83,7 +99,7 @@ src/
     features.py           build-time switches (for example the YouTube sources)
     database/             SQLite storage for tracks and playlists
     import_sources/       where music can be imported from (files, YouTube)
-    services/             library scanning, editing, metadata, artwork, playback, MPRIS
+    services/             library scanning, editing, metadata, artwork, playback, MPRIS, keyboard shortcuts
     views/                Library, Albums, Artists, Playlists and Preferences pages
     widgets/              player bar, edit and import windows, shared controls
 ```
@@ -108,7 +124,7 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 - [x] Equalizer
 - [x] Per-track Equalizer
 - [x] ReplayGain
-- [ ] Keyboard shortcuts
+- [x] Keyboard shortcuts
 - [ ] Auto-scan
 - [ ] Drag and drop to import
 - [ ] Duplicate check on import
