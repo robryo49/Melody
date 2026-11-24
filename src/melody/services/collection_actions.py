@@ -18,6 +18,7 @@ from melody.services.compilations import (
     is_compilation,
 )
 from melody.services.settings import get_settings
+from melody.services.replaygain import read_track_gain, supports_replaygain
 from melody.services.singles import has_album
 from melody.services.track_range import track_length
 from melody.services.image_sources import (
@@ -27,6 +28,7 @@ from melody.services.image_sources import (
     track_search,
 )
 from melody.widgets.cover_style import install_cover_css
+from melody.widgets.gain_slider import GainSlider
 from melody.widgets.image_picker import show_image_picker, texture_from_bytes
 from melody.widgets.range_selector import TimeRangeSelector
 
@@ -807,6 +809,7 @@ def show_edit_dialog(
         allow_unchanged=False,
         round_cover=False,
         info=None,
+        replaygain_spec=None,
 ):
     """Open a window with a cover on the left and editable fields on the right.
 
@@ -816,7 +819,12 @@ def show_edit_dialog(
          "noun": "artist",            # optional: enables the suggestion list
          "suggestions": [...],        # optional
          "priority_field": "artist",  # optional: rank by another field
-         "optional": True}            # optional: may be left empty
+         "optional": True,           # optional: may be left empty
+         "placeholder": "...",        # optional: shown while empty
+         "tooltip": "...",            # optional
+         "validate": check}           # optional: check(text) -> bool; the
+                                      # field is outlined, and Save waits,
+                                      # while it is False
 
     ``callback`` receives ``{key: text}`` and is only called when something
     actually changed. The cover is ``cover_path`` if it exists, otherwise
@@ -841,6 +849,10 @@ def show_edit_dialog(
     checkbox is added. ``values["kind"]`` is then given to ``callback``:
     ``None`` (decided by length), ``"track"`` or ``"compilation"``.
 
+    With ``replaygain_spec`` (``{"initial": dB or None}``) a ReplayGain
+    slider is added under the fields. ``values["replaygain"]`` is then given
+    to ``callback``: the gain in dB, or ``None`` for no tag.
+
     With ``round_cover`` the cover is shown as a circle (an artist's
     picture).
 
@@ -860,6 +872,12 @@ def show_edit_dialog(
     original = {
         spec["key"]: str(spec.get("initial") or "").strip()
         for spec in specs
+    }
+    # Fields with a rule of their own (a number, say).
+    validators = {
+        spec["key"]: spec["validate"]
+        for spec in specs
+        if spec.get("validate") is not None
     }
 
     window = Adw.Window()
@@ -893,6 +911,7 @@ def show_edit_dialog(
         cover_size,
         len(specs) * 86 - 16
         + (44 if compilation_spec else 0)
+        + (60 if replaygain_spec else 0)
         + (60 if hint else 0)
         + 44 * len(info or ()),
     )
@@ -1041,6 +1060,12 @@ def show_edit_dialog(
             priority=priority,
         )
 
+        if spec.get("placeholder"):
+            fields[spec["key"]].entry.set_placeholder_text(spec["placeholder"])
+
+        if spec.get("tooltip"):
+            fields[spec["key"]].entry.set_tooltip_text(spec["tooltip"])
+
     form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
     form.set_vexpand(True)
     for key in keys:
@@ -1113,6 +1138,17 @@ def show_edit_dialog(
         )
         original_range = selector.stored_range()
 
+    # The ReplayGain slider (only for windows given a ``replaygain_spec``).
+    gain_slider = None
+    gain_initial = None
+    if replaygain_spec:
+        gain_initial = replaygain_spec.get("initial")
+        gain_slider = GainSlider("ReplayGain", gain_initial)
+        form.append(gain_slider)
+
+    def gain_changed():
+        return gain_slider is not None and gain_slider.value != gain_initial
+
     # The "Compilation" checkbox (only for windows given a
     # ``compilation_spec``).
     compilation_check = None
@@ -1156,16 +1192,28 @@ def show_edit_dialog(
             return False
 
         values = current_values()
+
+        if not all(check(values[key]) for key, check in validators.items()):
+            return False
+
         return all(values[key] for key in required_keys) and (
             allow_unchanged
             or values != original
             or pending["data"] is not None
             or apply_state["on"]
             or range_changed()
+            or gain_changed()
             or compilation_changed()
         )
 
     def on_changed(*_args):
+        # A field that breaks its rule is outlined in red.
+        for key, check in validators.items():
+            if check(fields[key].get_text()):
+                fields[key].entry.remove_css_class("error")
+            else:
+                fields[key].entry.add_css_class("error")
+
         save_button.set_sensitive(can_save())
 
     def on_save(*_args):
@@ -1180,6 +1228,8 @@ def show_edit_dialog(
             values["start_time"], values["end_time"] = selector.stored_range()
         if compilation_check is not None:
             values["kind"] = compilation_kind()
+        if gain_slider is not None:
+            values["replaygain"] = gain_slider.value
         window.close()
         callback(values)
 
@@ -1192,6 +1242,9 @@ def show_edit_dialog(
 
     if compilation_check is not None:
         compilation_check.connect("toggled", on_changed)
+
+    if gain_slider is not None:
+        gain_slider.connect_changed(on_changed)
 
     def on_image_selected(data):
         # 256px, like the covers loaded from the library: a picture's natural
@@ -1266,6 +1319,7 @@ def show_edit_track_dialog(
         window_title="Edit track",
         hint=None,
         allow_unchanged=False,
+        replaygain=False,
 ):
     """Edit a track's title (file name), artist and album.
 
@@ -1274,6 +1328,11 @@ def show_edit_track_dialog(
     ``{"title": ..., "artist": ..., "album": ..., "start_time": ...,
     "end_time": ...}`` (the last two are ``None`` for the very start / end of
     the track).
+
+    With ``replaygain`` the track's ReplayGain tag (in dB) is a slider too,
+    and ``callback`` also receives it as ``"replaygain"`` (a number of dB, or
+    None for no tag). A file type that cannot hold the tag shows a note
+    instead.
 
     ``window_title`` and ``hint`` replace the window's title and the note
     under the fields, and ``allow_unchanged`` lets Save be pressed without
@@ -1312,6 +1371,16 @@ def show_edit_track_dialog(
             "optional": True,
         },
     ]
+
+    # The track's ReplayGain tag, when ReplayGain is switched on.
+    replaygain_spec = None
+    replaygain_unsupported = False
+
+    if replaygain and track_path:
+        if supports_replaygain(track_path):
+            replaygain_spec = {"initial": read_track_gain(track_path)}
+        else:
+            replaygain_unsupported = True
 
     def image_search(values):
         # What is in the window, not what the track is right now: it may have
@@ -1358,6 +1427,11 @@ def show_edit_track_dialog(
     if track.get("play_count") is not None:
         info = [("Play count", str(int(track["play_count"])))]
 
+    if replaygain_unsupported:
+        info = list(info or ()) + [
+            ("ReplayGain", "Not available for this type of file"),
+        ]
+
     show_edit_dialog(
         parent,
         window_title,
@@ -1370,6 +1444,7 @@ def show_edit_track_dialog(
         compilation_spec=compilation_spec,
         allow_unchanged=allow_unchanged,
         info=info,
+        replaygain_spec=replaygain_spec,
     )
 
 

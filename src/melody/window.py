@@ -64,6 +64,12 @@ from melody.views import (
 )
 from melody.services.compilations import is_compilation
 from melody.services.settings import get_settings
+from melody.services.equalizer import get_equalizer
+from melody.services.replaygain import (
+    ReplayGainError,
+    read_track_gain,
+    write_track_gain,
+)
 from melody.import_sources import get_import_sources
 from melody.services.metadata import MetadataError
 from melody.widgets.image_picker import show_image_picker
@@ -79,6 +85,7 @@ from melody.widgets.import_dialogs import (
 )
 from melody.widgets.player_bar import PlayerBar
 from melody.widgets.count_control import CountControl
+from melody.widgets.equalizer_dialog import show_equalizer_dialog
 from melody.widgets.track_table import (
     RECENT_COLUMNS,
     TrackSort,
@@ -114,6 +121,12 @@ class MelodyWindow(Adw.ApplicationWindow):
         )
 
         self.settings = get_settings()
+
+        # The equalizer: what was chosen last time is applied now, and every
+        # change after that is heard at once.
+        self.equalizer = get_equalizer()
+        self._apply_equalizer()
+        self.equalizer.connect_changed(self._apply_equalizer)
 
         self.views = {
             # Looks through everything at once.
@@ -413,16 +426,25 @@ class MelodyWindow(Adw.ApplicationWindow):
             "Preferences",
             "emblem-system-symbolic",
         )
+        equalizer_row = self._create_navigation_row(
+            "Equalizer",
+            "audio-speakers-symbolic",
+        )
 
-        # Not a page: it opens the preferences in a window of their own.
+        # Not pages: they open in a window of their own.
         preferences_list = Gtk.ListBox()
         preferences_list.set_selection_mode(Gtk.SelectionMode.NONE)
         preferences_list.set_activate_on_single_click(True)
         preferences_list.add_css_class("navigation-sidebar")
         preferences_list.connect(
             "row-activated",
-            lambda _list_box, _row: self._show_preferences(),
+            lambda _list_box, row: (
+                self._show_equalizer()
+                if row is equalizer_row
+                else self._show_preferences()
+            ),
         )
+        preferences_list.append(equalizer_row)
         preferences_list.append(preferences_row)
         sidebar.append(preferences_list)
 
@@ -635,6 +657,21 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _show_preferences(self):
         show_preferences_dialog(self, self.settings, self._rescan_library)
+
+    def _apply_equalizer(self):
+        """Give the player the equalizer's gains (all zeros while it is off)
+        and whether to use ReplayGain."""
+        self.playback_manager.set_equalizer(self.equalizer.effective_gains())
+        self.playback_manager.set_replaygain_enabled(
+            self.equalizer.replaygain_enabled
+        )
+
+    def _show_equalizer(self):
+        show_equalizer_dialog(
+            self,
+            self.equalizer,
+            available=self.playback_manager.has_equalizer,
+        )
 
     def _update_compilations_ui(self):
         """The Compilations page only exists while compilations are enabled."""
@@ -1063,6 +1100,11 @@ class MelodyWindow(Adw.ApplicationWindow):
                     )
                     return
 
+            if "replaygain" in values and not self._save_replaygain(
+                    track, values["replaygain"],
+            ):
+                return
+
             if changed:
                 try:
                     result = self.library_editor.edit_track(
@@ -1092,8 +1134,32 @@ class MelodyWindow(Adw.ApplicationWindow):
             )
 
         show_edit_track_dialog(
-            self, track, save, library_tracks=self.tracks,
+            self,
+            track,
+            save,
+            library_tracks=self.tracks,
+            # The ReplayGain field only shows while ReplayGain is switched on.
+            replaygain=self.equalizer.replaygain_enabled,
         )
+
+    def _save_replaygain(self, track, gain):
+        """Write the ReplayGain chosen in the edit window (a number of dB, or
+        None to take the tag away) into the track's file. Done before the
+        rest of the edit, so a rename carries it along. False, after telling
+        the person, when it could not be saved."""
+        try:
+            # Nothing to write when it is what the file already has.
+            if gain == read_track_gain(track["path"]):
+                return True
+
+            write_track_gain(track["path"], gain)
+        except ReplayGainError as error:
+            show_error_dialog(self, "Could not save the ReplayGain", error)
+            return False
+
+        # If it is the track being played, it sounds right away.
+        self.playback_manager.refresh_replaygain()
+        return True
 
     def _delete_track(self, track):
         """The "Delete" entry of a track's menu: ask, then move the file to the
@@ -2105,6 +2171,8 @@ class MelodyWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _on_close_request(self, window):
+        # A slider moved a moment ago may not have been saved yet.
+        self.equalizer.flush()
         self.mpris.close()
         self.playback_manager.close()
         self._discard_downloads()

@@ -434,6 +434,11 @@ class PlayerBar(Gtk.Box):
         self.play_button.set_icon_name(icon)
 
     def _on_repeat_clicked(self):
+        self.cycle_repeat()
+
+    def cycle_repeat(self):
+        """Go to the next repeat mode (off, all, one). What the repeat button
+        does, and the R key."""
         self.playback_manager.cycle_repeat_mode()
         self._update_repeat_button()
 
@@ -456,6 +461,11 @@ class PlayerBar(Gtk.Box):
             self.repeat_button.remove_css_class("dim-label")
 
     def _on_shuffle_clicked(self):
+        self.toggle_shuffle()
+
+    def toggle_shuffle(self):
+        """Turn shuffle on or off. What the shuffle button does, and the S
+        key."""
         self.playback_manager.toggle_shuffle()
         self._update_shuffle_button()
 
@@ -486,6 +496,11 @@ class PlayerBar(Gtk.Box):
         self._update_volume_icon()
 
     def _on_volume_button_clicked(self, button):
+        self.toggle_mute()
+
+    def toggle_mute(self):
+        """Mute the player, or bring the volume back to what it was. What the
+        volume button does, and the M key."""
         if self.volume.get_value() > 0:
             self._previous_volume = self.volume.get_value()
             self.volume.set_value(0)

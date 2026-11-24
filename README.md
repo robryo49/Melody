@@ -103,12 +103,12 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 ## TODO
 
 - [x] Multi-track select
-- [ ] Drag and drop to import
-- [ ] Duplicate check on import
 - [x] "Currently playing" menu
 - [x] "Playing queue" menu
-- [ ] Equalizer
-- [ ] Per-track Equalizer
-- [ ] ReplayGain
+- [x] Equalizer
+- [x] Per-track Equalizer
+- [x] ReplayGain
 - [ ] Keyboard shortcuts
 - [ ] Auto-scan
+- [ ] Drag and drop to import
+- [ ] Duplicate check on import

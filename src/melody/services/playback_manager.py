@@ -4,6 +4,7 @@ import time
 
 import gi
 
+from melody.services.replaygain import MAX_GAIN, read_replaygain
 from melody.services.track_range import track_range
 
 gi.require_version("Gst", "1.0")
@@ -24,6 +25,22 @@ class PlaybackManager:
         self.player = Gst.ElementFactory.make("playbin", "melody-player")
         if self.player is None:
             raise RuntimeError("Could not create the GStreamer playbin element")
+
+        # The equalizer sits in the audio path (see ``set_equalizer``). None
+        # when GStreamer's equalizer plugin is not installed: the music then
+        # plays untouched.
+        self._equalizer = None
+        self._preamp = None
+        # The preamp's volume is the product of two things: the equalizer's
+        # headroom (see ``set_equalizer``) and the ReplayGain of the track
+        # being played (see ``_apply_replaygain``).
+        self._equalizer_headroom = 1.0
+        self._replaygain_enabled = False
+        self._replaygain_factor = 1.0
+        audio_filter = self._create_audio_filter()
+
+        if audio_filter is not None:
+            self.player.set_property("audio-filter", audio_filter)
 
         self.bus = self.player.get_bus()
         self.bus.add_signal_watch()
@@ -67,6 +84,118 @@ class PlaybackManager:
 
         self.player.set_property("volume", self.volume)
         GLib.timeout_add(1000, self._tick)
+
+    # The equalizer's bands, in dB, as GStreamer's ``equalizer-10bands``
+    # allows them.
+    EQUALIZER_BANDS = 10
+    EQUALIZER_MIN_GAIN = -24.0
+    EQUALIZER_MAX_GAIN = 12.0
+
+    def _create_audio_filter(self):
+        """The elements the sound goes through: a preamp, then the equalizer.
+
+        The preamp carries the equalizer's headroom and the ReplayGain (see
+        ``_update_preamp``). If the equalizer plugin is missing, the preamp
+        is kept on its own, so ReplayGain still works. Returns None if even
+        that cannot be built.
+        """
+        for description in (
+            "audioconvert ! volume name=melody-preamp ! "
+            "equalizer-10bands name=melody-equalizer ! audioconvert",
+            "audioconvert ! volume name=melody-preamp ! audioconvert",
+        ):
+            try:
+                audio_filter = Gst.parse_bin_from_description(
+                    description,
+                    True,
+                )
+            except GLib.Error:
+                continue
+
+            preamp = audio_filter.get_by_name("melody-preamp")
+
+            if preamp is None:
+                continue
+
+            self._preamp = preamp
+            self._equalizer = audio_filter.get_by_name("melody-equalizer")
+            return audio_filter
+
+        return None
+
+    @property
+    def has_equalizer(self):
+        """Whether the equalizer can be used (its GStreamer plugin is there)."""
+        return self._equalizer is not None
+
+    def set_equalizer(self, gains):
+        """Set the gain of each of the ten bands, in dB (0 leaves it alone).
+        Takes effect at once, even in the middle of a track."""
+        if self._equalizer is None:
+            return
+
+        gains = [
+            max(self.EQUALIZER_MIN_GAIN, min(self.EQUALIZER_MAX_GAIN, float(gain)))
+            for gain in list(gains)[:self.EQUALIZER_BANDS]
+        ]
+        gains += [0.0] * (self.EQUALIZER_BANDS - len(gains))
+
+        for index, gain in enumerate(gains):
+            self._equalizer.set_property(f"band{index}", gain)
+
+        # Headroom: the loudest boost is taken off the whole sound, so the
+        # boosted bands cannot go past the top.
+        boost = max(0.0, max(gains))
+        self._equalizer_headroom = 10 ** (-boost / 20)
+        self._update_preamp()
+
+    def _update_preamp(self):
+        """Set the preamp's volume: the equalizer's headroom times the
+        ReplayGain of the track being played."""
+        if self._preamp is None:
+            return
+
+        volume = self._equalizer_headroom * self._replaygain_factor
+        self._preamp.set_property("volume", max(0.0, min(10.0, volume)))
+
+    def set_replaygain_enabled(self, enabled):
+        """Play tracks with their ReplayGain tag (or without). Takes effect at
+        once, even in the middle of a track."""
+        enabled = bool(enabled)
+
+        if enabled == self._replaygain_enabled:
+            return
+
+        self._replaygain_enabled = enabled
+        self._apply_replaygain()
+
+    def refresh_replaygain(self):
+        """The ReplayGain tag of the track being played may have been edited:
+        read it again."""
+        self._apply_replaygain()
+
+    def _apply_replaygain(self):
+        """Work out the correction for the track being played, from its tags.
+
+        A track with no ReplayGain tag, or any trouble reading it, is played
+        as it is. A boost never goes past what the track's own peak tag
+        allows, so it cannot make it distort.
+        """
+        factor = 1.0
+        path = (self.current_track or {}).get("path")
+
+        if self._replaygain_enabled and path:
+            gain, peak = read_replaygain(path)
+
+            if gain is not None:
+                gain = max(-MAX_GAIN, min(MAX_GAIN, gain))
+                factor = 10 ** (gain / 20)
+
+                if peak and peak > 0 and factor * peak > 1.0:
+                    factor = 1.0 / peak
+
+        self._replaygain_factor = factor
+        self._update_preamp()
 
     def set_queue(self, tracks):
         self.queue_version += 1
@@ -367,6 +496,8 @@ class PlaybackManager:
         self.player.set_property("uri", uri)
 
         self.current_track = track
+        # The track's ReplayGain, before it starts to play.
+        self._apply_replaygain()
         # A new play (a repeated track starts over too).
         self._listened = 0.0
         self._play_counted = False
