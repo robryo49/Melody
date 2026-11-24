@@ -33,6 +33,8 @@ from melody.widgets.track_table import (
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    enable_multiple_selection,
+    link_selections,
     update_favorite_in_list,
     update_play_count_in_list,
 )
@@ -436,9 +438,9 @@ class ArtistsView(Gtk.Box):
         self.artist_compilations_heading.add_css_class("title-4")
 
         self.artist_compilation_list = Gtk.ListBox()
-        self.artist_compilation_list.set_selection_mode(
-            Gtk.SelectionMode.NONE
-        )
+        # Several tracks can be selected (Ctrl or Shift + click) to act on
+        # them together, from their right-click menu.
+        enable_multiple_selection(self.artist_compilation_list)
         self.artist_compilation_list.set_activate_on_single_click(False)
         self.artist_compilation_list.add_css_class("boxed-list")
         self.artist_compilation_list.connect(
@@ -454,14 +456,19 @@ class ArtistsView(Gtk.Box):
         self.artist_singles_heading.add_css_class("title-4")
 
         self.artist_single_list = Gtk.ListBox()
-        self.artist_single_list.set_selection_mode(
-            Gtk.SelectionMode.NONE
-        )
+        enable_multiple_selection(self.artist_single_list)
         self.artist_single_list.set_activate_on_single_click(False)
         self.artist_single_list.add_css_class("boxed-list")
         self.artist_single_list.connect(
             "row-activated",
             self._on_single_activated,
+        )
+
+        # The compilations and the singles are two lists on one page: only
+        # one of them holds the selection a right click acts on.
+        link_selections(
+            self.artist_compilation_list,
+            self.artist_single_list,
         )
 
         artist_sections = Gtk.Box(
@@ -621,9 +628,7 @@ class ArtistsView(Gtk.Box):
         self.album_page.append(separator)
 
         self.album_track_list = Gtk.ListBox()
-        self.album_track_list.set_selection_mode(
-            Gtk.SelectionMode.NONE
-        )
+        enable_multiple_selection(self.album_track_list)
         self.album_track_list.set_activate_on_single_click(False)
         self.album_track_list.add_css_class("boxed-list")
         self.album_track_list.connect(

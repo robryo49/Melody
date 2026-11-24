@@ -30,6 +30,9 @@ class PlaybackManager:
         self.bus.connect("message", self._on_bus_message)
 
         self.queue = []
+        # Goes up each time the queue's tracks change, so a view of the queue
+        # knows when to be built again.
+        self.queue_version = 0
         self.current_index = -1
         self.current_track = None
         # What the queue was started from (an album, an artist, a playlist, the
@@ -66,6 +69,7 @@ class PlaybackManager:
         GLib.timeout_add(1000, self._tick)
 
     def set_queue(self, tracks):
+        self.queue_version += 1
         self.queue = list(tracks)
         self.current_index = -1
         self.source = None
@@ -82,6 +86,7 @@ class PlaybackManager:
         exist are dropped. With nothing playing, the queue simply becomes the
         whole library, as with ``set_queue``.
         """
+        self.queue_version += 1
         current = self.current_track
 
         if current is None:
@@ -153,8 +158,104 @@ class PlaybackManager:
 
         self._insert_in_queue(len(self.queue), track, next_up=False)
 
-    def _insert_in_queue(self, position, track, next_up):
+    def play_tracks_after_current(self, tracks):
+        """``play_after_current`` for several tracks: they play one after the
+        other, in the order given, right after the current one (shuffle
+        included). With nothing playing, they are played from the first."""
+        tracks = list(tracks)
+
+        if not tracks:
+            return
+
+        if not 0 <= self.current_index < len(self.queue):
+            self.play_queue(tracks, 0)
+            return
+
+        for offset, track in enumerate(tracks):
+            self._insert_in_queue(
+                self.current_index + 1 + offset,
+                track,
+                next_up=True,
+                history_offset=offset,
+            )
+
+    def add_tracks_to_queue(self, tracks):
+        """``add_to_queue`` for several tracks, in the order given. With
+        nothing playing, they are played from the first."""
+        tracks = list(tracks)
+
+        if not tracks:
+            return
+
+        if not 0 <= self.current_index < len(self.queue):
+            self.play_queue(tracks, 0)
+            return
+
+        for track in tracks:
+            self._insert_in_queue(len(self.queue), track, next_up=False)
+
+    def play_index(self, index):
+        """Play the track at ``index`` of the queue, keeping the queue."""
+        if not 0 <= index < len(self.queue):
+            return
+
+        self.current_index = index
+        self._reset_shuffle(index)
+        self._load_current_track()
+
+    def _reset_shuffle_after_edit(self):
+        # The shuffle order is made of positions in the queue, which just
+        # moved: it is made again around the track being played.
+        playing = 0 <= self.current_index < len(self.queue)
+        self._reset_shuffle(self.current_index if playing else None)
+
+    def remove_from_queue(self, index):
+        """Take the track at ``index`` out of the queue. The track being
+        played stays (False is returned for it)."""
+        if not 0 <= index < len(self.queue) or index == self.current_index:
+            return False
+
+        del self.queue[index]
+
+        if index < self.current_index:
+            self.current_index -= 1
+
+        self.queue_version += 1
+        self._reset_shuffle_after_edit()
+        return True
+
+    def play_queued_next(self, index):
+        """Move the track at ``index`` to right after the one being played."""
+        if (
+                not 0 <= self.current_index < len(self.queue)
+                or not 0 <= index < len(self.queue)
+                or index == self.current_index
+        ):
+            return
+
+        track = self.queue.pop(index)
+
+        if index < self.current_index:
+            self.current_index -= 1
+
+        self.queue.insert(self.current_index + 1, track)
+        self.queue_version += 1
+        self._reset_shuffle_after_edit()
+
+    def clear_upcoming(self):
+        """Empty the queue of everything but the track being played."""
+        if not 0 <= self.current_index < len(self.queue):
+            return
+
+        del self.queue[self.current_index + 1:]
+        self.queue_version += 1
+        self._reset_shuffle_after_edit()
+
+    def _insert_in_queue(self, position, track, next_up, history_offset=0):
+        # ``history_offset`` keeps several tracks queued "next" in the order
+        # they were given: each goes one place further in the shuffle order.
         self.queue.insert(position, track)
+        self.queue_version += 1
 
         if not self.shuffle:
             return
@@ -172,7 +273,7 @@ class PlaybackManager:
 
         if next_up:
             self._shuffle_history.insert(
-                self._shuffle_history_position + 1,
+                self._shuffle_history_position + 1 + history_offset,
                 position,
             )
         else:
@@ -185,6 +286,7 @@ class PlaybackManager:
         """Play ``tracks`` from ``index``. ``source`` says what they are (the
         album, artist, playlist... they were started from)."""
         self.queue = list(tracks)
+        self.queue_version += 1
 
         if not self.queue:
             self.stop()

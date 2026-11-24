@@ -29,6 +29,7 @@ from melody.widgets.track_table import (
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    enable_multiple_selection,
     update_favorite_in_list,
     update_play_count_in_list,
 )
@@ -533,7 +534,9 @@ class AlbumsView(Gtk.Box):
         self.details_page.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         self.track_list = Gtk.ListBox()
-        self.track_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        # Several tracks can be selected (Ctrl or Shift + click) to act on
+        # them together, from their right-click menu.
+        enable_multiple_selection(self.track_list)
         self.track_list.set_activate_on_single_click(False)
         self.track_list.add_css_class("boxed-list")
         self.track_list.connect("row-activated", self._on_track_activated)

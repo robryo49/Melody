@@ -18,9 +18,12 @@ from melody.services.collection_actions import (
     show_merge_confirmation,
     show_playlist_picker_dialog,
     show_text_dialog,
+    show_set_album_dialog,
+    show_set_artist_dialog,
     set_track_navigation,
     set_track_deletion,
     set_track_queue_actions,
+    set_tracks_actions,
     set_artwork_actions,
     attach_track_context_menu,
     track_is_playing,
@@ -47,12 +50,16 @@ from melody.services.playlist_artwork import (
 )
 from melody.services.playback_manager import PlaybackManager
 from melody.services.recent_tracks import select_recent_tracks
+from melody.services.most_played_tracks import select_most_played_tracks
 from melody.services.mpris import MprisService
 from melody.views import (
     LibraryView,
     AlbumsView,
     ArtistsView,
     PlaylistsView,
+    SearchView,
+    QueueView,
+    NowPlayingView,
     show_preferences_dialog,
 )
 from melody.services.compilations import is_compilation
@@ -71,6 +78,7 @@ from melody.widgets.import_dialogs import (
     show_search_dialog,
 )
 from melody.widgets.player_bar import PlayerBar
+from melody.widgets.count_control import CountControl
 from melody.widgets.track_table import (
     RECENT_COLUMNS,
     TrackSort,
@@ -85,6 +93,10 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.set_default_size(1100, 720)
 
         self.tracks = []
+        # The pages visited, to go back and forth between them with the
+        # arrows of the sidebar, and where the current one is in that list.
+        self._history = []
+        self._history_index = -1
         self._sync_thread = None
         # True while a library scan is running; ``_rescan_done`` is told when
         # the scan a Preferences "Rescan" button started is over.
@@ -104,6 +116,12 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.settings = get_settings()
 
         self.views = {
+            # Looks through everything at once.
+            "Search": SearchView(),
+            # The track being played, shown large.
+            "Currently playing": NowPlayingView(self.playback_manager),
+            # What is playing and what comes after it.
+            "Playing queue": QueueView(self.playback_manager),
             # With compilations enabled the Library only has single tracks,
             # and the compilations have a page of their own.
             "Library": LibraryView(
@@ -145,20 +163,56 @@ class MelodyWindow(Adw.ApplicationWindow):
                 columns=RECENT_COLUMNS,
                 # Newest first, until a column name is clicked.
                 initial_sort=TrackSort("added", True),
+                # "Show the last N tracks added", set right in the header.
+                header_widget=CountControl(
+                    self.settings.recent_count,
+                    self._set_recent_count,
+                    before="Show the last",
+                    after="tracks added",
+                    tooltip=(
+                        "How many of the most recently added tracks to show"
+                    ),
+                ),
+            ),
+            "Most played": LibraryView(
+                title="Most played",
+                noun="track",
+                search_placeholder="Search most played tracks…",
+                empty_title="No played tracks yet",
+                empty_description=(
+                    "Tracks you listen to show up here, the most played "
+                    "first."
+                ),
+                empty_icon="audio-headphones-symbolic",
+                select_tracks=self._select_most_played_tracks,
+                # The most played first, until a column name is clicked.
+                initial_sort=TrackSort("play_count", True),
+                # "Show the N most played tracks", set right in the header.
+                header_widget=CountControl(
+                    self.settings.most_played_count,
+                    self._set_most_played_count,
+                    before="Show the",
+                    after="most played tracks",
+                    tooltip="How many of the most played tracks to show",
+                ),
             ),
             "Albums": AlbumsView(),
             "Artists": ArtistsView(),
             "Playlists": PlaylistsView(),
         }
 
-        for name in ("Library", "Compilations", "Favorites", "Recent", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
             self.views[name].set_playback_manager(self.playback_manager)
 
-        for name in ("Library", "Compilations", "Favorites", "Recent", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
             self.views[name].set_context_actions(
                 self._edit_track,
                 self._choose_playlist_for_track,
             )
+        self.views["Currently playing"].set_context_actions(
+            self._edit_track,
+            self._choose_playlist_for_track,
+        )
         # The Library can import music.
         self.views["Library"].set_import_callback(self._import_music)
         # The pages of an album, an artist and a playlist can too, and what
@@ -171,6 +225,17 @@ class MelodyWindow(Adw.ApplicationWindow):
         set_track_queue_actions(
             self.playback_manager.play_after_current,
             self.playback_manager.add_to_queue,
+        )
+        # The right-click menu of several selected tracks.
+        set_tracks_actions(
+            play=self._play_tracks,
+            play_after=self.playback_manager.play_tracks_after_current,
+            add_to_queue=self.playback_manager.add_tracks_to_queue,
+            set_album=self._set_album_of_tracks,
+            set_artist=self._set_artist_of_tracks,
+            add_to_playlist=self._choose_playlist_for_tracks,
+            favorite=self._toggle_favorite_of_tracks,
+            delete=self._delete_tracks,
         )
         # "Copy artwork" / "Paste artwork" in the right-click menus.
         set_artwork_actions(
@@ -200,6 +265,11 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Artists"].set_image_callbacks(
             self._change_artist_image,
             self._change_album_image,
+        )
+        # A search result opens the artist's or the album's page.
+        self.views["Search"].set_navigation(
+            self._open_artist_of_track,
+            self._open_album_of_track,
         )
         set_track_navigation(
             self._open_album_of_track,
@@ -240,8 +310,31 @@ class MelodyWindow(Adw.ApplicationWindow):
         self._start_library_sync()
 
     def _create_sidebar(self):
+        header_bar = Adw.HeaderBar()
+
+        # Back at the left of the header bar and forward at the right, so the
+        # title stays in the middle, balanced.
+        self.back_button = Gtk.Button.new_from_icon_name("go-previous-symbolic")
+        self.back_button.set_tooltip_text("Back")
+        self.back_button.set_sensitive(False)
+        self.back_button.connect(
+            "clicked",
+            lambda _button: self._step_history(-1),
+        )
+
+        self.forward_button = Gtk.Button.new_from_icon_name("go-next-symbolic")
+        self.forward_button.set_tooltip_text("Forward")
+        self.forward_button.set_sensitive(False)
+        self.forward_button.connect(
+            "clicked",
+            lambda _button: self._step_history(1),
+        )
+
+        header_bar.pack_start(self.back_button)
+        header_bar.pack_end(self.forward_button)
+
         toolbar = Adw.ToolbarView()
-        toolbar.add_top_bar(Adw.HeaderBar())
+        toolbar.add_top_bar(header_bar)
 
         sidebar = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -266,11 +359,16 @@ class MelodyWindow(Adw.ApplicationWindow):
         )
 
         for name, icon in [
+            # The first page: searches everything.
+            ("Search", "system-search-symbolic"),
+            ("Currently playing", "media-playback-start-symbolic"),
+            ("Playing queue", "view-list-ordered-symbolic"),
             ("Library", "audio-x-generic-symbolic"),
             # Only shown while compilations are enabled.
             ("Compilations", "media-playlist-consecutive-symbolic"),
             ("Favorites", "emblem-favorite-symbolic"),
             ("Recent", "document-open-recent-symbolic"),
+            ("Most played", "audio-headphones-symbolic"),
             ("Albums", "media-optical-symbolic"),
             ("Artists", "system-users-symbolic"),
             ("Playlists", "view-list-symbolic"),
@@ -279,10 +377,12 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.navigation_rows[name] = row
             self.navigation_list.append(row)
 
-        # A line before Albums and before Playlists splits the pages into
-        # three groups: the tracks (Library, Compilations, Favorites), the
-        # collections (Albums, Artists) and the Playlists.
+        # A line before Library, before Albums and before Playlists splits
+        # the pages into four groups: Search, the tracks (Library,
+        # Compilations, Favorites, Recent, Most played), the collections
+        # (Albums, Artists) and the Playlists.
         group_starts = (
+            self.navigation_rows["Library"],
             self.navigation_rows["Albums"],
             self.navigation_rows["Playlists"],
         )
@@ -458,19 +558,50 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _select_recent_tracks(self, tracks):
         """The tracks of the Recent page among ``tracks``: as many as the
-        settings say, newest first."""
+        header's number says, newest first."""
         return select_recent_tracks(tracks, self.settings)
+
+    def _set_recent_count(self, count):
+        """A new number in the Recent page's header: save it, which also
+        brings the pages up to date (see ``_on_settings_changed``)."""
+        self.settings.recent_count = count
+
+    def _select_most_played_tracks(self, tracks):
+        """The tracks of the Most played page among ``tracks``: as many as the
+        header's number says, the most played first."""
+        return select_most_played_tracks(tracks, self.settings)
+
+    def _set_most_played_count(self, count):
+        """A new number in the Most played page's header (see above)."""
+        self.settings.most_played_count = count
 
     def _toggle_favorite(self, track):
         """A click on a track's heart: mark it as a favorite, or take the mark
         away."""
-        favorite = not track.get("favorite")
+        self._set_favorite(track, not track.get("favorite"))
 
+    def _toggle_favorite_of_tracks(self, tracks):
+        """Mark several tracks as favorites, or, when they all are already,
+        take the mark away from all of them."""
+        favorite = not all(track.get("favorite") for track in tracks)
+
+        for track in tracks:
+            if bool(track.get("favorite")) == favorite:
+                continue
+
+            if not self._set_favorite(track, favorite, refresh_page=False):
+                break
+
+        GLib.idle_add(self._refresh_favorites_page)
+
+    def _set_favorite(self, track, favorite, refresh_page=True):
+        """Mark ``track`` as a favorite, or take the mark away, and update
+        everything that shows it. False when it could not be saved."""
         try:
             self.database.set_favorite(track["id"], favorite)
         except Exception as error:
             show_error_dialog(self, "Could not change the favorite", error)
-            return
+            return False
 
         # Rows and queues may hold their own copies of the track, so the
         # library's copy and every row showing it are updated.
@@ -493,7 +624,10 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         # The Favorites page lists exactly the marked tracks. Done once the
         # click is over, as it may remove the very row that was clicked.
-        GLib.idle_add(self._refresh_favorites_page)
+        if refresh_page:
+            GLib.idle_add(self._refresh_favorites_page)
+
+        return True
 
     def _refresh_favorites_page(self):
         self.views["Favorites"].set_tracks(self.tracks)
@@ -517,7 +651,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         # Which tracks go where depends on the settings: sort them out again.
         self._update_compilations_ui()
 
-        for name in ("Library", "Compilations", "Favorites", "Recent", "Albums", "Artists"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
             self.views[name].set_tracks(self.tracks)
 
     def _on_navigation_selected(self, list_box, row):
@@ -529,7 +663,44 @@ class MelodyWindow(Adw.ApplicationWindow):
                 self._select_page(name)
                 break
 
+    def _record_page(self, name):
+        """Remember that ``name`` was shown, for the back and forward arrows.
+        Going somewhere new drops the pages that were ahead."""
+        if (
+                self._history_index >= 0
+                and self._history[self._history_index] == name
+        ):
+            return
+
+        del self._history[self._history_index + 1:]
+        self._history.append(name)
+        self._history_index = len(self._history) - 1
+        self._update_history_buttons()
+
+    def _update_history_buttons(self):
+        self.back_button.set_sensitive(self._history_index > 0)
+        self.forward_button.set_sensitive(
+            self._history_index < len(self._history) - 1
+        )
+
+    def _step_history(self, step):
+        """Go to the previous (-1) or next (1) page visited, skipping a page
+        that is not there any more (Compilations, once turned off)."""
+        index = self._history_index + step
+
+        while 0 <= index < len(self._history):
+            row = self.navigation_rows.get(self._history[index])
+
+            if row is not None and row.get_visible():
+                self._history_index = index
+                self._select_page(self._history[index])
+                self._update_history_buttons()
+                return
+
+            index += step
+
     def _select_page(self, name):
+        self._record_page(name)
         self.content_stack.set_visible_child_name(name.lower())
         self.content_header.set_title_widget(
             Gtk.Label(label=name)
@@ -539,6 +710,15 @@ class MelodyWindow(Adw.ApplicationWindow):
             # Plays, favorites and imports since the page was last shown may
             # have changed what the automatic playlists select.
             self.views["Playlists"].refresh_automatic()
+
+        if name == "Most played":
+            # Plays since the page was last shown may have changed the
+            # ranking.
+            self.views["Most played"].set_tracks(self.tracks)
+
+        if name == "Search":
+            # Ready to type.
+            self.views["Search"].focus_search()
 
         if name in self.navigation_rows:
             self.navigation_list.select_row(
@@ -656,6 +836,8 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Compilations"].set_tracks(tracks)
         self.views["Favorites"].set_tracks(tracks)
         self.views["Recent"].set_tracks(tracks)
+        self.views["Most played"].set_tracks(tracks)
+        self.views["Search"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(
@@ -696,14 +878,17 @@ class MelodyWindow(Adw.ApplicationWindow):
         except Exception as error:
             show_error_dialog(self, "Could not add track", error)
 
-    def _choose_playlist_for_track(self, track, exclude_playlist_id=None):
+    def _manual_playlists(self, exclude_playlist_id=None):
         # An automatic playlist takes no track by hand (its rules pick them),
         # so it is not offered.
-        playlists = [
+        return [
             playlist for playlist in self.database.get_playlists()
             if playlist["id"] != exclude_playlist_id
             and not playlist.get("automatic")
         ]
+
+    def _choose_playlist_for_track(self, track, exclude_playlist_id=None):
+        playlists = self._manual_playlists(exclude_playlist_id)
         show_playlist_picker_dialog(
             self,
             track,
@@ -711,6 +896,43 @@ class MelodyWindow(Adw.ApplicationWindow):
             lambda playlist_id: self._add_track_to_playlist(track, playlist_id),
             lambda: self._create_playlist_for_track(track),
         )
+
+    def _add_tracks_to_playlist(self, tracks, playlist_id):
+        try:
+            self.database.add_tracks_to_playlist(
+                playlist_id,
+                [track["id"] for track in tracks],
+            )
+            self.views["Playlists"].refresh()
+        except Exception as error:
+            show_error_dialog(self, "Could not add tracks", error)
+
+    def _choose_playlist_for_tracks(self, tracks, exclude_playlist_id=None):
+        """"Add to playlist…" for several selected tracks."""
+        playlists = self._manual_playlists(exclude_playlist_id)
+        show_playlist_picker_dialog(
+            self,
+            tracks,
+            playlists,
+            lambda playlist_id: self._add_tracks_to_playlist(
+                tracks, playlist_id,
+            ),
+            lambda: self._create_playlist_for_tracks(tracks),
+        )
+
+    def _create_playlist_for_tracks(self, tracks):
+        def create(name):
+            try:
+                playlist_id = self.database.create_playlist(name)
+                self.database.add_tracks_to_playlist(
+                    playlist_id,
+                    [track["id"] for track in tracks],
+                )
+                self.views["Playlists"].refresh()
+            except Exception as error:
+                show_error_dialog(self, "Could not create playlist", error)
+
+        show_text_dialog(self, "Create playlist", "Choose a name for the new playlist.", "", create)
 
     # ------------------------------------------------------------------
     # "Open album" / "Open artist" in a track's right-click menu
@@ -772,6 +994,8 @@ class MelodyWindow(Adw.ApplicationWindow):
                 page = "Favorites"
             elif source["key"] == self.views["Recent"].title:
                 page = "Recent"
+            elif source["key"] == self.views["Most played"].title:
+                page = "Most played"
             else:
                 page = (
                     "Compilations"
@@ -926,6 +1150,149 @@ class MelodyWindow(Adw.ApplicationWindow):
                 self,
                 "The track was deleted, but not everything was cleaned up",
                 "\n".join(result["errors"]),
+            )
+
+        self._reload_library_from_database()
+
+    # ------------------------------------------------------------------
+    # Several selected tracks (their right-click menu)
+    # ------------------------------------------------------------------
+
+    def _play_tracks(self, tracks):
+        """Play the selected tracks, in the order shown, as a queue of their
+        own."""
+        self.playback_manager.play_queue(tracks, 0)
+
+    def _set_album_of_tracks(self, tracks):
+        """"Set album…": ask for an album (and its album artist), then give it
+        to every selected track."""
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        show_set_album_dialog(
+            self,
+            tracks,
+            self.tracks,
+            lambda values: self._edit_tracks(
+                tracks,
+                album=values["album"],
+                album_artist=values["artist"],
+            ),
+        )
+
+    def _set_artist_of_tracks(self, tracks):
+        """"Set artist…": ask for an artist, then give it to every selected
+        track."""
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        show_set_artist_dialog(
+            self,
+            tracks,
+            self.tracks,
+            lambda values: self._edit_tracks(
+                tracks,
+                artist=values["artist"],
+            ),
+        )
+
+    def _edit_tracks(self, tracks, **changes):
+        """Give every one of ``tracks`` the album and / or artist in
+        ``changes`` (see ``LibraryEditor.edit_tracks``)."""
+        # The files are rewritten and moved, which a scan running at the same
+        # time would undo.
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        try:
+            result = self.library_editor.edit_tracks(
+                [track["id"] for track in tracks],
+                **changes,
+            )
+        except Exception as error:
+            show_error_dialog(self, "Could not edit the tracks", error)
+            return
+
+        self._finish_collection_rename(result, "track")
+
+        if result.get("moved"):
+            # The tracks are in other albums now: their covers are looked up
+            # again by a scan in the background (it may need the network,
+            # which must not freeze the window).
+            self._rescan_library()
+
+    def _delete_tracks(self, tracks):
+        """The "Delete" entry of the menu of several selected tracks: ask, then
+        move their files to the trash and take them out of the library and
+        their playlists."""
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        count = len(tracks)
+
+        dialog = Adw.MessageDialog.new(
+            self,
+            f"Delete {count} tracks?",
+            f"These {count} tracks will be moved to the trash and removed "
+            "from your library and from their playlists.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance(
+            "delete",
+            Adw.ResponseAppearance.DESTRUCTIVE,
+        )
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect(
+            "response",
+            lambda _dialog, response: self._on_delete_tracks_response(
+                tracks, response,
+            ),
+        )
+        dialog.present()
+
+    def _on_delete_tracks_response(self, tracks, response):
+        if response != "delete":
+            return
+
+        deleted = set()
+        errors = []
+
+        for track in tracks:
+            try:
+                result = self.library_editor.delete_track(track["id"])
+            except Exception as error:
+                name = track.get("title") or track.get("path")
+                errors.append(f"{name}: {error}")
+                continue
+
+            deleted.add(track["id"])
+            errors.extend(result.get("errors", []))
+
+        # A deleted track must not keep playing.
+        current = self.playback_manager.current_track
+
+        if current is not None and current.get("id") in deleted:
+            self.playback_manager.stop()
+            self.player_bar.set_track(None)
+
+        if errors:
+            show_error_dialog(
+                self,
+                (
+                    "Some tracks could not be deleted"
+                    if len(deleted) < len(tracks)
+                    else (
+                        "The tracks were deleted, but not everything was "
+                        "cleaned up"
+                    )
+                ),
+                "\n".join(errors),
             )
 
         self._reload_library_from_database()
@@ -1678,6 +2045,8 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Compilations"].set_tracks(tracks)
         self.views["Favorites"].set_tracks(tracks)
         self.views["Recent"].set_tracks(tracks)
+        self.views["Most played"].set_tracks(tracks)
+        self.views["Search"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)

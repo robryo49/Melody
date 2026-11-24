@@ -379,6 +379,100 @@ class LibraryEditor:
                 f'A file named "{title}" already exists in that album.'
             ) from None
 
+    def edit_tracks(
+            self,
+            track_ids,
+            *,
+            artist: str | None = None,
+            album: str | None = None,
+            album_artist: str | None = None,
+    ) -> dict:
+        """Change the artist and / or the album of several tracks at once.
+
+        A tag given as ``None`` is left as each track has it. Giving an
+        ``artist`` without an ``album_artist`` also makes it the tracks' album
+        artist, as editing one track does (see ``edit_track``). Titles are
+        never touched.
+
+        The tags are rewritten and the files moved to
+        ``<album artist>/<album>/<title>.<ext>``, or to
+        ``<album artist>/<title>.<ext>`` for a track with no album. A file
+        that would land on another one gets a number, so nothing is ever
+        overwritten, and a track that already has what is asked is left
+        alone.
+
+        Returns what the move returns: ``{"moved": how many tracks were
+        changed, "errors": [...], ...}``. Nothing is changed when one of the
+        tracks no longer exists.
+        """
+        artist = None if artist is None else artist.strip()
+        album = None if album is None else album.strip()
+        album_artist = None if album_artist is None else album_artist.strip()
+
+        if artist is not None and not artist:
+            raise ValueError("An artist name cannot be empty")
+        if album is not None and not album:
+            raise ValueError("An album name cannot be empty")
+        if album_artist is not None and not album_artist:
+            raise ValueError("An album artist name cannot be empty")
+
+        def wanted(track):
+            """The (artist, album, album artist) ``track`` should end up
+            with."""
+            if album_artist is not None:
+                new_album_artist = album_artist
+            elif artist is not None:
+                new_album_artist = artist
+            else:
+                new_album_artist = track["album_artist"]
+
+            return (
+                track["artist"] if artist is None else artist,
+                track["album"] if album is None else album,
+                new_album_artist,
+            )
+
+        tracks = []
+
+        for track_id in dict.fromkeys(track_ids):
+            track = self.database.get_track(track_id)
+
+            if track is None:
+                raise LibraryEditError("A selected track no longer exists")
+
+            current = (
+                track["artist"],
+                track["album"],
+                track["album_artist"],
+            )
+
+            if wanted(track) != current:
+                tracks.append(track)
+
+        if not tracks:
+            return {"moved": 0, "errors": [], "merged": False}
+
+        def make_metadata(current):
+            new_artist, new_album, new_album_artist = wanted(current)
+
+            return TrackMetadata(
+                title=current["title"],
+                artist=new_artist,
+                album=new_album,
+                album_artist=new_album_artist,
+                duration=current["duration"],
+                year=current["year"],
+                genre=current["genre"],
+            )
+
+        # Tracks moving into an album that exists are not a merge to ask
+        # about: a name that is taken just gets a number.
+        return self._move_collection_tracks(
+            tracks,
+            make_metadata,
+            allow_merge=True,
+        )
+
     def import_track(
             self,
             source: Path,

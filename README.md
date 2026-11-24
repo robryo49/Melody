@@ -6,6 +6,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 
 ### Library
 
+- **Back and forward:** the arrows next to the title of the sidebar go back and forth between the pages visited, like a browser's.
 - **Library page:** every track in one list, with search and sorting by title, album, artist or duration. A side panel shows the selected track's artwork and details.
 - **Albums, Artists and Playlists pages:** a grid of covers, with a page of its own for each album, artist and playlist.
 - **Compilations:** long audio files such as mixes and live sets can be kept apart from regular tracks. They get their own page, and the minimum length that makes a file a compilation is configurable.
@@ -19,6 +20,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Covers and images** can be changed for tracks, albums, artists and playlists, by choosing an image file or by searching YouTube. Above the search, a row of suggestions from other sites: Deezer, iTunes and the Cover Art Archive for albums (and for the album of a track), Deezer, Wikimedia and Fanart.tv for artists. A track's search looks for its music video ("title artist") and its edit window can also reuse the album's cover; an album's looks for covers on YouTube Music; an artist's shows the pictures of the YouTube channels found for their name; a playlist's is a plain video search. The thumbnails are cropped to a square.
 - **Start and end times:** a track can be trimmed to a section of its file.
 - **Delete:** the right-click menu on a track can delete it. The file is moved to the trash and the track leaves the library and its playlists.
+- **Multi-track select:** in every list of tracks, click selects a track, Ctrl+click adds or removes one, Shift+click selects a range and Ctrl+A selects the whole list. Right-clicking the selection opens a menu to play it, play it after the current track, add it to the queue, set the album or the artist of all the tracks at once, add them to a playlist, mark them as favorites, remove them from the playlist or delete them.
 
 ### Importing music
 
@@ -32,6 +34,8 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - Playback through GStreamer, with a player bar offering previous, play and pause, next, a seek bar, volume, shuffle and repeat (off, all, one).
 - Pressing play with nothing loaded plays the track selected in the Library.
 - The play queue follows the page you start playing from.
+- **Currently playing page:** under Search in the sidebar, it shows the track being played large, with its cover, title, artist and album (both open their pages), duration and play count, the previous, play or pause and next controls, and buttons to favorite, add to a playlist or edit it.
+- **Playing queue page:** under Search in the sidebar, it lists the track being played and everything after it. Double-click a track to play from there, right-click to play it, move it to right after the current track or remove it, and use Clear to empty everything after the current track.
 - Desktop integration through MPRIS: media keys, the shell's media widget and tools such as `playerctl` can show what is playing and control play, pause, next, previous, seek, shuffle, repeat and volume.
 
 ## Requirements
@@ -98,13 +102,13 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 
 ## TODO
 
-- [x] Play queue
-- [ ] ~~Import image from Google image~~
-- [x] Copy-paste artwork
+- [x] Multi-track select
 - [ ] Drag and drop to import
-- [x] Play count and last played
-- [x] Favorites
-- [ ] Search menu that searches among everything
 - [ ] Duplicate check on import
-- [ ] Multi-track select, with a different right-click menu than single-track select
+- [x] "Currently playing" menu
+- [x] "Playing queue" menu
+- [ ] Equalizer
+- [ ] Per-track Equalizer
+- [ ] ReplayGain
+- [ ] Keyboard shortcuts
 - [ ] Auto-scan

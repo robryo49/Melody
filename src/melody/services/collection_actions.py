@@ -11,7 +11,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from melody.services.artwork import get_cached_own_artwork, image_as_png
-from melody.widgets.track_table import toggle_favorite
+from melody.widgets.track_table import selected_tracks, toggle_favorite
 from melody.services.compilations import (
     automatic_is_compilation,
     format_clock,
@@ -1479,6 +1479,190 @@ def show_edit_playlist_dialog(
     )
 
 
+def _show_tracks_dialog(parent, window_title, description, specs, callback):
+    """A small window with a few fields, for a change made to several tracks
+    at once.
+
+    ``specs`` describes the fields as for ``show_edit_dialog`` (``key``,
+    ``label``, ``initial``, ``noun``, ``suggestions``, ``priority_field``),
+    plus an optional ``placeholder``, shown while a field is empty. Every
+    field has to be filled in, and Save waits until one of them differs from
+    where it started. ``callback`` receives ``{key: text}``.
+    """
+    window = Adw.Window()
+    window.set_transient_for(parent)
+    window.set_modal(True)
+    window.set_title(window_title)
+    window.set_resizable(False)
+
+    toolbar = Adw.ToolbarView()
+    header = Adw.HeaderBar()
+    header.set_show_start_title_buttons(False)
+    header.set_show_end_title_buttons(False)
+
+    cancel_button = Gtk.Button(label="Cancel")
+    save_button = Gtk.Button(label="Save")
+    save_button.add_css_class("suggested-action")
+    save_button.set_sensitive(False)
+    header.pack_start(cancel_button)
+    header.pack_end(save_button)
+    toolbar.add_top_bar(header)
+
+    original = {
+        spec["key"]: str(spec.get("initial") or "").strip()
+        for spec in specs
+    }
+    fields = {}
+
+    for spec in specs:
+        priority_key = spec.get("priority_field")
+        priority = (
+            (lambda key=priority_key: fields[key].get_text().casefold())
+            if priority_key else None
+        )
+        field = SuggestionField(
+            spec["label"],
+            noun=spec.get("noun"),
+            suggestions=spec.get("suggestions", ()),
+            initial=original[spec["key"]],
+            priority=priority,
+        )
+
+        if spec.get("placeholder"):
+            field.entry.set_placeholder_text(spec["placeholder"])
+
+        fields[spec["key"]] = field
+
+    note = Gtk.Label(label=description, xalign=0, wrap=True)
+    # Wrap to the column, never widen it.
+    note.set_max_width_chars(1)
+    note.add_css_class("dim-label")
+    note.add_css_class("caption")
+
+    content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    content.set_size_request(380, -1)
+    content.set_margin_top(24)
+    content.set_margin_bottom(24)
+    content.set_margin_start(24)
+    content.set_margin_end(24)
+
+    for field in fields.values():
+        content.append(field)
+
+    content.append(note)
+
+    def current_values():
+        return {key: field.get_text() for key, field in fields.items()}
+
+    def can_save():
+        values = current_values()
+        return all(values.values()) and values != original
+
+    def on_changed(*_args):
+        save_button.set_sensitive(can_save())
+
+    def on_save(*_args):
+        if not can_save():
+            return
+
+        values = current_values()
+        window.close()
+        callback(values)
+
+    for field in fields.values():
+        field.connect_changed(on_changed)
+        field.connect_activate(on_save)
+
+    cancel_button.connect("clicked", lambda _button: window.close())
+    save_button.connect("clicked", on_save)
+    _close_on_escape(window)
+
+    toolbar.set_content(content)
+    window.set_content(toolbar)
+    window.present()
+    next(iter(fields.values())).grab_focus(show_suggestions=False)
+
+
+def show_set_album_dialog(parent, tracks, library_tracks, callback):
+    """Choose one album, and its album artist, for several tracks.
+
+    The fields start with what the tracks have in common. Where they differ
+    the field is empty, and Save waits for a value. ``callback`` receives
+    ``{"album": ..., "artist": ...}``, the artist being the album artist.
+    """
+    library_tracks = list(library_tracks)
+    albums = {str(track.get("album") or "").strip() for track in tracks}
+    artists = {
+        str(track.get("album_artist") or track.get("artist") or "").strip()
+        for track in tracks
+    }
+
+    specs = [
+        {
+            "key": "album",
+            "label": "Album",
+            "initial": next(iter(albums)) if len(albums) == 1 else "",
+            "placeholder": "Different albums" if len(albums) > 1 else None,
+            "noun": "album",
+            "suggestions": _album_suggestions(library_tracks),
+            # Albums by the album artist typed below come first.
+            "priority_field": "artist",
+        },
+        {
+            "key": "artist",
+            "label": "Album artist",
+            "initial": next(iter(artists)) if len(artists) == 1 else "",
+            "placeholder": "Different artists" if len(artists) > 1 else None,
+            "noun": "artist",
+            "suggestions": _artist_suggestions(
+                library_tracks, album_artists=True
+            ),
+        },
+    ]
+
+    _show_tracks_dialog(
+        parent,
+        "Set album",
+        (
+            f"All {len(tracks)} tracks go into this album. Their files are "
+            "renamed and moved to match its title and artist."
+        ),
+        specs,
+        callback,
+    )
+
+
+def show_set_artist_dialog(parent, tracks, library_tracks, callback):
+    """Choose one artist for several tracks.
+
+    The field starts with the tracks' artist when it is the same for all of
+    them. ``callback`` receives ``{"artist": ...}``.
+    """
+    artists = {str(track.get("artist") or "").strip() for track in tracks}
+
+    specs = [
+        {
+            "key": "artist",
+            "label": "Artist",
+            "initial": next(iter(artists)) if len(artists) == 1 else "",
+            "placeholder": "Different artists" if len(artists) > 1 else None,
+            "noun": "artist",
+            "suggestions": _artist_suggestions(list(library_tracks)),
+        },
+    ]
+
+    _show_tracks_dialog(
+        parent,
+        "Set artist",
+        (
+            f"The artist of all {len(tracks)} tracks. It becomes their album "
+            "artist too, so their files are moved to this artist's folder."
+        ),
+        specs,
+        callback,
+    )
+
+
 def show_playlist_picker_dialog(
         parent,
         track,
@@ -1486,7 +1670,8 @@ def show_playlist_picker_dialog(
         on_select,
         on_create=None,
 ):
-    """Open a window listing playlists to add ``track`` to.
+    """Open a window listing playlists to add ``track`` to (it may also be a
+    list of tracks).
 
     ``on_select(playlist_id)`` is called when a playlist is picked and
     ``on_create()`` when "New playlist…" is chosen (if provided).
@@ -1506,9 +1691,16 @@ def show_playlist_picker_dialog(
     content.set_margin_start(24)
     content.set_margin_end(24)
 
-    track_title = str(track.get("title") or "Unknown Title")
+    tracks = list(track) if isinstance(track, (list, tuple)) else [track]
+
+    if len(tracks) == 1:
+        track_title = str(tracks[0].get("title") or "Unknown Title")
+        prompt_text = f"Choose a playlist for “{track_title}”"
+    else:
+        prompt_text = f"Choose a playlist for {len(tracks)} tracks"
+
     prompt = Gtk.Label(
-        label=f"Choose a playlist for “{track_title}”",
+        label=prompt_text,
         xalign=0,
         wrap=True,
     )
@@ -1702,6 +1894,32 @@ def set_track_queue_actions(play_after, add_to_queue):
     _track_queue.update(play_after=play_after, add_to_queue=add_to_queue)
 
 
+# The right-click menu of several selected tracks. Like the entries above,
+# what its entries do is registered once by the window. Every action
+# receives the list of selected tracks, in the order the list shows them.
+_tracks_actions = {}
+
+
+def set_tracks_actions(**actions):
+    """Register what the menu of several selected tracks does.
+
+    ``play``, ``play_after``, ``add_to_queue``, ``set_album``, ``set_artist``,
+    ``favorite`` and ``delete`` are called with the tracks. ``add_to_playlist``
+    is called with them too, and with ``exclude_playlist_id=`` when the menu
+    is a playlist's (the playlist the tracks are already in).
+    """
+    _tracks_actions.update(actions)
+
+
+def run_tracks_action(name, tracks, **options):
+    """Do one of the registered actions for ``tracks`` (nothing happens when
+    there is none under ``name``)."""
+    action = _tracks_actions.get(name)
+
+    if action is not None and tracks:
+        action(list(tracks), **options)
+
+
 # "Delete" in a track's menu removes the track from the whole library, so,
 # like the navigation above, the window registers it once for every menu.
 _track_deletion = {"delete": None}
@@ -1715,6 +1933,53 @@ def set_track_deletion(delete_track):
     _track_deletion["delete"] = delete_track
 
 
+def _tracks_menu_entries(tracks, on_remove_from_playlist, exclude_playlist_id):
+    """The entries of the menu of several selected tracks, as
+    ``_show_entries_menu`` takes them."""
+    entries = []
+
+    def add(label, name, **options):
+        if name in _tracks_actions:
+            entries.append(
+                (label, lambda: run_tracks_action(name, tracks, **options))
+            )
+
+    add("Play", "play")
+    add("Play after", "play_after")
+    add("Add to queue", "add_to_queue")
+
+    entries.append(None)
+    add("Set album…", "set_album")
+    add("Set artist…", "set_artist")
+
+    entries.append(None)
+    add(
+        "Add to playlist…",
+        "add_to_playlist",
+        exclude_playlist_id=exclude_playlist_id,
+    )
+    add(
+        "Remove from favorites"
+        if all(track.get("favorite") for track in tracks)
+        else "Add to favorites",
+        "favorite",
+    )
+
+    if on_remove_from_playlist is not None:
+        entries.append(
+            (
+                "Remove from playlist",
+                lambda: on_remove_from_playlist(tracks),
+            )
+        )
+
+    if "delete" in _tracks_actions:
+        entries.append(None)
+        add("Delete", "delete")
+
+    return entries
+
+
 def attach_track_context_menu(
         row,
         track,
@@ -1724,6 +1989,8 @@ def attach_track_context_menu(
         on_edit,
         on_add_to_playlist,
         on_remove_from_playlist=None,
+        on_remove_many_from_playlist=None,
+        exclude_playlist_id=None,
         on_view=None,
         position=Gtk.PositionType.BOTTOM,
 ):
@@ -1738,6 +2005,12 @@ def attach_track_context_menu(
     choosing a playlist) opens its own window instead of a sub-menu.
     All callbacks receive the track. ``is_playing(track)`` decides whether
     the first entry reads "Play" or "Pause".
+
+    In a list that selects several tracks, a right click on one of several
+    selected tracks opens the menu of the whole selection instead (see
+    ``set_tracks_actions``). ``on_remove_many_from_playlist(tracks)`` is that
+    menu's "Remove from playlist", and ``exclude_playlist_id`` the playlist
+    its "Add to playlist…" leaves out.
     """
     gesture = Gtk.GestureClick.new()
     gesture.set_button(3)
@@ -1751,12 +2024,51 @@ def attach_track_context_menu(
         if track is None:
             return
 
-        # Right-clicking a track selects it at once. The list only selects a
-        # row when the click is released, which for a right click is after the
-        # menu has closed.
+        # The list would also take this click for a plain click on the row
+        # when it is released, and drop a selection of several tracks.
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+        # Right-clicking a track selects it at once. A track that is one of
+        # several selected keeps the selection, and the menu is then the one
+        # of the whole selection.
         parent = row.get_parent()
+        selected = []
+
         if isinstance(parent, Gtk.ListBox):
-            parent.select_row(row)
+            multiple = (
+                parent.get_selection_mode() == Gtk.SelectionMode.MULTIPLE
+            )
+
+            if multiple and row.is_selected():
+                selected = selected_tracks(parent)
+
+            if len(selected) < 2:
+                selected = []
+                alone = (
+                    row.is_selected()
+                    and len(parent.get_selected_rows()) == 1
+                )
+
+                if not alone:
+                    if multiple:
+                        parent.unselect_all()
+
+                    parent.select_row(row)
+
+        if len(selected) > 1:
+            _show_entries_menu(
+                row,
+                x,
+                y,
+                _tracks_menu_entries(
+                    selected,
+                    on_remove_many_from_playlist,
+                    exclude_playlist_id,
+                ),
+                position=position,
+                heading=f"{len(selected)} tracks selected",
+            )
+            return
 
         popover = Gtk.Popover()
         popover.set_parent(row)
@@ -1856,51 +2168,80 @@ def attach_context_menu(widget, get_entries):
     gesture.set_button(3)
 
     def on_pressed(_gesture, _press_count, x, y):
-        popover = Gtk.Popover()
-        popover.set_parent(widget)
-        _style_context_menu(popover)
-        popover.set_has_arrow(False)
-        popover.set_halign(Gtk.Align.START)
-        popover.set_position(Gtk.PositionType.BOTTOM)
-
-        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
-        def add_item(label, callback):
-            button = Gtk.Button()
-            button.set_has_frame(False)
-            button.add_css_class("flat")
-            button.set_halign(Gtk.Align.FILL)
-            button.set_child(Gtk.Label(label=label, xalign=0))
-
-            def activate(_button):
-                popover.popdown()
-                callback()
-
-            button.connect("clicked", activate)
-            menu.append(button)
-
-        for entry in get_entries():
-            if entry is None:
-                menu.append(
-                    Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-                )
-                continue
-
-            label, callback = entry
-            add_item(label, callback)
-
-        menu.set_size_request(MENU_WIDTH - 2 * MENU_PADDING, -1)
-
-        rect = Gdk.Rectangle()
-        rect.x = int(x)
-        rect.y = int(y)
-        rect.width = 1
-        rect.height = 1
-
-        popover.set_child(menu)
-        popover.set_pointing_to(rect)
-        popover.connect("closed", lambda _popover: popover.unparent())
-        popover.popup()
+        _show_entries_menu(widget, x, y, get_entries())
 
     gesture.connect("pressed", on_pressed)
     widget.add_controller(gesture)
+
+
+def _show_entries_menu(
+        widget,
+        x,
+        y,
+        entries,
+        *,
+        position=Gtk.PositionType.BOTTOM,
+        heading=None,
+):
+    """Open a context menu on ``widget``, its top-left corner at (x, y).
+
+    ``entries`` is a list of ``(label, callback)`` pairs, ``callback()`` being
+    called with nothing; a ``None`` in it is drawn as a separator. ``heading``
+    is an optional line of dimmed text above the entries.
+    """
+    popover = Gtk.Popover()
+    popover.set_parent(widget)
+    _style_context_menu(popover)
+    popover.set_has_arrow(False)
+    popover.set_halign(Gtk.Align.START)
+    popover.set_position(position)
+
+    menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+    if heading:
+        title = Gtk.Label(label=heading, xalign=0)
+        title.add_css_class("dim-label")
+        title.add_css_class("caption")
+        title.set_margin_start(MENU_ITEM_PADDING_X)
+        title.set_margin_end(MENU_ITEM_PADDING_X)
+        title.set_margin_top(MENU_ITEM_PADDING_Y)
+        title.set_margin_bottom(MENU_ITEM_PADDING_Y)
+        menu.append(title)
+        menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+    def add_item(label, callback):
+        button = Gtk.Button()
+        button.set_has_frame(False)
+        button.add_css_class("flat")
+        button.set_halign(Gtk.Align.FILL)
+        button.set_child(Gtk.Label(label=label, xalign=0))
+
+        def activate(_button):
+            popover.popdown()
+            callback()
+
+        button.connect("clicked", activate)
+        menu.append(button)
+
+    for entry in entries:
+        if entry is None:
+            menu.append(
+                Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            )
+            continue
+
+        label, callback = entry
+        add_item(label, callback)
+
+    menu.set_size_request(MENU_WIDTH - 2 * MENU_PADDING, -1)
+
+    rect = Gdk.Rectangle()
+    rect.x = int(x)
+    rect.y = int(y)
+    rect.width = 1
+    rect.height = 1
+
+    popover.set_child(menu)
+    popover.set_pointing_to(rect)
+    popover.connect("closed", lambda _popover: popover.unparent())
+    popover.popup()

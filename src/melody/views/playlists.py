@@ -23,6 +23,7 @@ from melody.widgets.track_table import (
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    enable_multiple_selection,
     update_favorite_in_list,
     update_play_count_in_list,
 )
@@ -451,7 +452,9 @@ class PlaylistsView(Gtk.Box):
         )
 
         self.track_list = Gtk.ListBox()
-        self.track_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        # Several tracks can be selected (Ctrl or Shift + click) to act on
+        # them together, from their right-click menu.
+        enable_multiple_selection(self.track_list)
         self.track_list.set_activate_on_single_click(False)
         self.track_list.add_css_class("boxed-list")
         self.track_list.connect("row-activated", self._on_track_activated)
@@ -552,6 +555,11 @@ class PlaylistsView(Gtk.Box):
                 if self.current_playlist.get("automatic")
                 else lambda t: self._remove_track(playlist_id, t)
             )
+            remove_many = (
+                None
+                if self.current_playlist.get("automatic")
+                else lambda ts: self._remove_tracks(playlist_id, ts)
+            )
 
             attach_track_context_menu(
                 row,
@@ -563,6 +571,8 @@ class PlaylistsView(Gtk.Box):
                     t, exclude_playlist_id=playlist_id
                 ),
                 on_remove_from_playlist=remove,
+                on_remove_many_from_playlist=remove_many,
+                exclude_playlist_id=playlist_id,
             )
 
         return row
@@ -770,6 +780,12 @@ class PlaylistsView(Gtk.Box):
 
     def _remove_track(self, playlist_id, track):
         self.database.remove_track_from_playlist(playlist_id, track["id"])
+        self.refresh()
+
+    def _remove_tracks(self, playlist_id, tracks):
+        for track in tracks:
+            self.database.remove_track_from_playlist(playlist_id, track["id"])
+
         self.refresh()
 
     def _on_create_clicked(self, button):

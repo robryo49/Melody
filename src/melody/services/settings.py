@@ -12,11 +12,12 @@ DEFAULTS = {
     "compilation_threshold": 900.0,
     # Also list compilations in the album their file belongs to.
     "show_compilations_in_albums": False,
-    # What the Recent page shows: the tracks added in the last N days (True)
-    # or the N most recently added tracks (False).
-    "recent_by_days": True,
-    "recent_days": 30.0,
-    "recent_count": 50.0,
+    # What the Recent page shows: the N most recently added tracks. Set in
+    # the page's own header.
+    "recent_count": 30.0,
+    # What the Most played page shows: the N most played tracks. Also set in
+    # the page's own header.
+    "most_played_count": 30.0,
 }
 
 
@@ -60,6 +61,12 @@ class Settings:
 
         if not isinstance(data, dict):
             return
+
+        # Older versions could show the tracks added in the last N days
+        # instead. While that was on, the saved count was never used and is
+        # just the old default: start from the new default instead.
+        if data.get("recent_by_days") is True:
+            data.pop("recent_count", None)
 
         for key in DEFAULTS:
             if key in data:
@@ -126,28 +133,20 @@ class Settings:
         self.set("show_compilations_in_albums", value)
 
     @property
-    def recent_by_days(self) -> bool:
-        return self._values["recent_by_days"]
-
-    @recent_by_days.setter
-    def recent_by_days(self, value):
-        self.set("recent_by_days", value)
-
-    @property
-    def recent_days(self) -> float:
-        return self._values["recent_days"]
-
-    @recent_days.setter
-    def recent_days(self, value):
-        self.set("recent_days", value)
-
-    @property
     def recent_count(self) -> float:
         return self._values["recent_count"]
 
     @recent_count.setter
     def recent_count(self, value):
         self.set("recent_count", value)
+
+    @property
+    def most_played_count(self) -> float:
+        return self._values["most_played_count"]
+
+    @most_played_count.setter
+    def most_played_count(self, value):
+        self.set("most_played_count", value)
 
 
 _settings = None

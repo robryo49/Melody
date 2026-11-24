@@ -18,6 +18,7 @@ from melody.services.collection_actions import (
     open_track_album,
     open_track_artist,
     playback_source,
+    run_tracks_action,
     scroll_to_row,
     show_in_file_manager,
     toggle_track_playback,
@@ -29,6 +30,8 @@ from melody.widgets.track_table import (
     TrackSort,
     TrackTableHeader,
     create_track_row,
+    enable_multiple_selection,
+    selected_tracks,
     toggle_favorite,
     update_favorite_in_list,
     update_play_count_in_list,
@@ -55,6 +58,7 @@ class LibraryView(Gtk.Box):
             select_tracks=None,
             columns=DEFAULT_COLUMNS,
             initial_sort=None,
+            header_widget=None,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -72,6 +76,9 @@ class LibraryView(Gtk.Box):
         # N most recent). ``columns`` are the ones the table shows.
         self._select_tracks = select_tracks
         self._columns = columns
+        # A page's own control, shown in the header between the track count
+        # and the Play button (the Recent page's "Show the last N tracks").
+        self._header_widget = header_widget
 
         self.tracks = []
         # What the list shows right now, filtered and in its sort order: the
@@ -81,6 +88,9 @@ class LibraryView(Gtk.Box):
         self._artwork_request_id = 0
         self._edit_track = None
         self._choose_playlist = None
+        # True while the list is being rebuilt: its selection then changes
+        # many times for nothing (see ``_refresh_list``).
+        self._rebuilding = False
         # The column the list is sorted by (clicked in the header above it).
         self.track_sort = initial_sort or TrackSort()
 
@@ -142,6 +152,7 @@ class LibraryView(Gtk.Box):
 
         while child is not None:
             if child.track.get("id") == track_id:
+                self.track_list.unselect_all()
                 self.track_list.select_row(child)
                 scroll_to_row(child)
                 break
@@ -214,6 +225,10 @@ class LibraryView(Gtk.Box):
 
         header.append(title)
         header.append(self.count_label)
+
+        if self._header_widget is not None:
+            header.append(self._header_widget)
+
         header.append(self.play_all_button)
         header.append(self.import_button)
         header.append(self.search_entry)
@@ -221,12 +236,14 @@ class LibraryView(Gtk.Box):
 
     def _build_list(self):
         self.track_list = Gtk.ListBox()
-        self.track_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        # Several tracks can be selected (Ctrl or Shift + click) to act on
+        # them together, from their right-click menu.
+        enable_multiple_selection(self.track_list)
         self.track_list.set_activate_on_single_click(False)
         self.track_list.add_css_class("boxed-list")
         self.track_list.connect(
-            "row-selected",
-            self._on_selection_changed,
+            "selected-rows-changed",
+            self._on_selected_rows_changed,
         )
         self.track_list.connect(
             "row-activated",
@@ -410,30 +427,47 @@ class LibraryView(Gtk.Box):
 
         return box
 
+    def _selected_tracks(self):
+        """The selected tracks, in the order the list shows them."""
+        return selected_tracks(self.track_list)
+
     def _selected_track(self):
-        row = self.track_list.get_selected_row()
-        return row.track if row is not None else None
+        """The selected track when exactly one is selected. With none, or with
+        several (the details then describe the group), None."""
+        tracks = self._selected_tracks()
+        return tracks[0] if len(tracks) == 1 else None
 
     def _update_action_buttons(self):
-        track = self._selected_track()
-        has_track = track is not None
+        tracks = self._selected_tracks()
+        track = tracks[0] if len(tracks) == 1 else None
+        has_tracks = bool(tracks)
 
         for button in (
             self.play_button,
-            self.edit_button,
             self.playlist_button,
             self.favorite_button,
         ):
-            button.set_sensitive(has_track)
+            button.set_sensitive(has_tracks)
+
+        # Tracks are edited one at a time: the right-click menu of a
+        # selection sets the album or the artist of several together.
+        self.edit_button.set_sensitive(track is not None)
 
         self.favorite_button.set_label(
             "Remove from favorites"
-            if has_track and track.get("favorite")
+            if has_tracks and all(item.get("favorite") for item in tracks)
             else "Add to favorites"
         )
 
-        playing = has_track and track_is_playing(self.playback_manager, track)
-        self.play_button.set_label("Pause" if playing else "Play")
+        playing = (
+            track is not None
+            and track_is_playing(self.playback_manager, track)
+        )
+        self.play_button.set_label(
+            "Pause"
+            if playing
+            else ("Play selection" if len(tracks) > 1 else "Play")
+        )
 
         self.play_all_button.set_sensitive(bool(self._displayed_tracks))
         self.play_all_button.set_label(
@@ -489,11 +523,14 @@ class LibraryView(Gtk.Box):
         return True
 
     def _on_play_button_clicked(self, button):
-        track = self._selected_track()
+        tracks = self._selected_tracks()
 
-        if track is not None:
-            self._toggle_track(track)
-            self._update_action_buttons()
+        if len(tracks) > 1:
+            run_tracks_action("play", tracks)
+        elif tracks:
+            self._toggle_track(tracks[0])
+
+        self._update_action_buttons()
 
     def _on_artist_link_clicked(self):
         track = self._selected_track()
@@ -520,16 +557,20 @@ class LibraryView(Gtk.Box):
             self._edit_track(track)
 
     def _on_favorite_button_clicked(self, button):
-        track = self._selected_track()
+        tracks = self._selected_tracks()
 
-        if track is not None:
-            toggle_favorite(track)
+        if len(tracks) > 1:
+            run_tracks_action("favorite", tracks)
+        elif tracks:
+            toggle_favorite(tracks[0])
 
     def _on_playlist_button_clicked(self, button):
-        track = self._selected_track()
+        tracks = self._selected_tracks()
 
-        if track is not None and self._choose_playlist is not None:
-            self._choose_playlist(track)
+        if len(tracks) > 1:
+            run_tracks_action("add_to_playlist", tracks)
+        elif tracks and self._choose_playlist is not None:
+            self._choose_playlist(tracks[0])
 
     @staticmethod
     def _create_detail_label():
@@ -587,11 +628,13 @@ class LibraryView(Gtk.Box):
         )
 
     def _on_track_activated(self, list_box, row):
+        self._play_from_list(row.track)
+
+    def _play_from_list(self, selected_track):
+        """Like the Play button, but starting from ``selected_track``."""
         if self.playback_manager is None or not self._displayed_tracks:
             return
 
-        # Like the Play button, but starting from the track that was clicked.
-        selected_track = row.track
         queue = self._displayed_tracks
 
         for index, track in enumerate(queue):
@@ -604,27 +647,45 @@ class LibraryView(Gtk.Box):
                 return
 
     def play_selected(self):
-        """Play the selected track, as a double click on it would.
+        """Play the selected track, as a double click on it would. Several
+        selected tracks are played together, as a queue of their own.
 
         False (and nothing played) when no track is selected.
         """
-        row = self.track_list.get_selected_row()
+        tracks = self._selected_tracks()
 
-        if row is None or self.playback_manager is None:
+        if not tracks or self.playback_manager is None:
             return False
 
-        self._on_track_activated(self.track_list, row)
+        if len(tracks) > 1:
+            run_tracks_action("play", tracks)
+        else:
+            self._play_from_list(tracks[0])
+
         return True
 
-    def _on_selection_changed(self, list_box, row):
+    def _on_selected_rows_changed(self, list_box):
+        # While the list is rebuilt the selection is put back in one go (see
+        # ``_refresh_list``).
+        if not self._rebuilding:
+            self._show_selection()
+
+    def _show_selection(self):
+        """Show the selected track in the details panel. For several, say how
+        many there are and how long they last together."""
         self._artwork_request_id += 1
         request_id = self._artwork_request_id
+        tracks = self._selected_tracks()
 
-        if row is None:
+        if not tracks:
             self._clear_details()
             return
 
-        track = row.track
+        if len(tracks) > 1:
+            self._show_group_details(tracks)
+            return
+
+        track = tracks[0]
         track_path = str(track.get("path") or "")
 
         self.details_title.set_text(
@@ -670,12 +731,12 @@ class LibraryView(Gtk.Box):
         if request_id != self._artwork_request_id:
             return GLib.SOURCE_REMOVE
 
-        row = self.track_list.get_selected_row()
+        track = self._selected_track()
 
-        if row is None:
+        if track is None:
             return GLib.SOURCE_REMOVE
 
-        current_path = str(row.track.get("path") or "")
+        current_path = str(track.get("path") or "")
 
         if current_path != track_path:
             return GLib.SOURCE_REMOVE
@@ -685,6 +746,21 @@ class LibraryView(Gtk.Box):
             self.artwork_stack.set_visible_child_name("artwork")
 
         return GLib.SOURCE_REMOVE
+
+    def _show_group_details(self, tracks):
+        """Several tracks are selected: the panel says how many, and how long
+        they last together."""
+        total = sum(track_length(track) for track in tracks)
+
+        self.artwork_stack.set_visible_child_name("placeholder")
+        self.details_artwork.set_filename(None)
+        self.details_title.set_text(f"{len(tracks)} tracks selected")
+        self.details_artist.set_text("")
+        self.details_album.set_text("")
+        self.details_duration.set_text(self._format_duration(total))
+        self.details_plays.set_text("")
+        self.details_path.set_text("")
+        self._update_action_buttons()
 
     def _clear_details(self):
         self.artwork_stack.set_visible_child_name("placeholder")
@@ -749,36 +825,40 @@ class LibraryView(Gtk.Box):
         ]
 
     def _refresh_list(self):
-        # The selected track stays selected (and its details stay on screen)
-        # when the list is rebuilt: after an edit window is saved, a search,
-        # a new sort order...
-        selected = self._selected_track()
-        selected_id = selected.get("id") if selected is not None else None
+        # The selected tracks stay selected (and their details stay on
+        # screen) when the list is rebuilt: after an edit window is saved, a
+        # search, a new sort order...
+        selected_ids = {
+            track.get("id") for track in self._selected_tracks()
+        }
 
-        child = self.track_list.get_first_child()
+        # The selection changes while the rows go and come back: the details
+        # are brought up to date once, at the end.
+        self._rebuilding = True
 
-        while child is not None:
-            next_child = child.get_next_sibling()
-            self.track_list.remove(child)
-            child = next_child
+        try:
+            child = self.track_list.get_first_child()
 
-        visible_tracks = self._get_sorted_tracks(
-            self._get_filtered_tracks()
-        )
-        self._displayed_tracks = visible_tracks
+            while child is not None:
+                next_child = child.get_next_sibling()
+                self.track_list.remove(child)
+                child = next_child
 
-        selected_row = None
+            visible_tracks = self._get_sorted_tracks(
+                self._get_filtered_tracks()
+            )
+            self._displayed_tracks = visible_tracks
 
-        for track in visible_tracks:
-            row = self._create_track_row(track)
-            self.track_list.append(row)
+            for track in visible_tracks:
+                row = self._create_track_row(track)
+                self.track_list.append(row)
 
-            if selected_id is not None and track.get("id") == selected_id:
-                selected_row = row
+                if track.get("id") in selected_ids:
+                    self.track_list.select_row(row)
+        finally:
+            self._rebuilding = False
 
-        if selected_row is not None:
-            self.track_list.select_row(selected_row)
-
+        self._show_selection()
         self._update_view()
 
     def _on_search_changed(self, search_entry):

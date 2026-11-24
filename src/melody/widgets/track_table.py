@@ -363,6 +363,61 @@ class TrackTableHeader(Gtk.Box):
 
 
 # ----------------------------------------------------------------------
+# Selecting tracks
+# ----------------------------------------------------------------------
+
+def enable_multiple_selection(list_box):
+    """Let ``list_box`` (a list of track rows) select several tracks at once.
+
+    A click selects one track, Ctrl+click adds it to the selection or takes
+    it out, Shift+click selects everything up to it and Ctrl+A selects the
+    whole list.
+    """
+    list_box.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
+
+
+def selected_tracks(list_box):
+    """The tracks of the selected rows of ``list_box``, in the order the
+    list shows them."""
+    rows = sorted(
+        list_box.get_selected_rows(),
+        key=lambda row: row.get_index(),
+    )
+
+    return [
+        row.track
+        for row in rows
+        if getattr(row, "track", None) is not None
+    ]
+
+
+def link_selections(*list_boxes):
+    """Make ``list_boxes`` share one selection: selecting in one of them
+    clears the others.
+
+    A page can hold several lists of tracks (an artist's compilations and
+    singles), and a right click acts on the selection of the list it is in.
+    """
+    busy = [False]
+
+    def on_changed(changed):
+        if busy[0] or not changed.get_selected_rows():
+            return
+
+        busy[0] = True
+
+        try:
+            for other in list_boxes:
+                if other is not changed:
+                    other.unselect_all()
+        finally:
+            busy[0] = False
+
+    for list_box in list_boxes:
+        list_box.connect("selected-rows-changed", on_changed)
+
+
+# ----------------------------------------------------------------------
 # Favorites
 # ----------------------------------------------------------------------
 

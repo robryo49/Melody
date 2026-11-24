@@ -24,7 +24,6 @@ class PreferencesView(Adw.PreferencesPage):
         self._create_library_group()
         self._create_organization_group()
         self._create_compilations_group()
-        self._create_recent_group()
 
     def _create_library_group(self):
         group = Adw.PreferencesGroup(
@@ -129,63 +128,6 @@ class PreferencesView(Adw.PreferencesPage):
 
         self.add(group)
         self._sync_compilation_rows()
-
-    def _create_recent_group(self):
-        group = Adw.PreferencesGroup(
-            title="Recent",
-            description="Choose which tracks the Recent page shows.",
-        )
-
-        self.recent_mode_row = Adw.ComboRow(title="Show")
-        self.recent_mode_row.set_model(Gtk.StringList.new([
-            "Tracks added in the last N days",
-            "The N most recently added tracks",
-        ]))
-        self.recent_mode_row.set_selected(
-            0 if self.settings.recent_by_days else 1
-        )
-        self.recent_mode_row.connect(
-            "notify::selected",
-            self._on_recent_mode_changed,
-        )
-        group.add(self.recent_mode_row)
-
-        # Only the one that goes with the chosen mode is shown.
-        self.recent_days_row = Adw.SpinRow.new_with_range(1, 3650, 1)
-        self.recent_days_row.set_title("Number of days")
-        self.recent_days_row.set_value(self.settings.recent_days)
-        self.recent_days_row.connect(
-            "notify::value",
-            self._on_recent_days_changed,
-        )
-        group.add(self.recent_days_row)
-
-        self.recent_count_row = Adw.SpinRow.new_with_range(1, 10000, 1)
-        self.recent_count_row.set_title("Number of tracks")
-        self.recent_count_row.set_value(self.settings.recent_count)
-        self.recent_count_row.connect(
-            "notify::value",
-            self._on_recent_count_changed,
-        )
-        group.add(self.recent_count_row)
-
-        self.add(group)
-        self._sync_recent_rows()
-
-    def _sync_recent_rows(self):
-        by_days = self.settings.recent_by_days
-        self.recent_days_row.set_visible(by_days)
-        self.recent_count_row.set_visible(not by_days)
-
-    def _on_recent_mode_changed(self, row, _pspec):
-        self.settings.recent_by_days = row.get_selected() == 0
-        self._sync_recent_rows()
-
-    def _on_recent_days_changed(self, row, _pspec):
-        self.settings.recent_days = row.get_value()
-
-    def _on_recent_count_changed(self, row, _pspec):
-        self.settings.recent_count = row.get_value()
 
     def _on_rescan_clicked(self, button):
         if self._on_rescan is None:
