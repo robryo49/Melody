@@ -18,6 +18,7 @@ from melody.services.playlist_artwork import get_playlist_cover
 from melody.services.track_range import track_length
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
+from melody.widgets.file_drop import enable_file_drop
 from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.track_table import (
     TrackSort,
@@ -101,6 +102,26 @@ class PlaylistsView(Gtk.Box):
         """``callback(context)`` imports music from a playlist's page; the
         context names the playlist, so what is imported is added to it."""
         self.on_import = callback
+
+    def set_drop_callback(self, callback):
+        """Let audio files be dropped on a playlist's page: ``callback(paths,
+        context)`` imports them, with the same context as the Import button
+        (the playlist, so they are added to it).
+
+        An automatic playlist takes nothing by hand, so it takes no drop
+        either (its page has no Import button)."""
+        def can_import():
+            return (
+                self.current_playlist is not None
+                and not self.current_playlist.get("automatic")
+            )
+
+        def on_files(paths):
+            if can_import():
+                callback(paths, {"playlist_id": self.current_playlist["id"]})
+
+        # Only a playlist's page, not the grid of playlists.
+        enable_file_drop(self.details_page, on_files, accept=can_import)
 
     def set_image_callback(self, callback):
         """``callback(playlist)`` lets the person pick a new picture for a

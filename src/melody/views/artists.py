@@ -26,6 +26,7 @@ from melody.services.singles import has_album
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
 from melody.widgets.cover_style import install_cover_css
+from melody.widgets.file_drop import enable_file_drop
 from melody.widgets.import_dialogs import create_import_button
 from melody.widgets.link_label import make_link
 from melody.widgets.track_table import (
@@ -110,6 +111,33 @@ class ArtistsView(Gtk.Box):
         album, on an album's page), the starting values of what is
         imported."""
         self.on_import = callback
+
+    def set_drop_callback(self, callback):
+        """Let audio files be dropped on an artist's page and on one of their
+        albums' pages: ``callback(paths, context)`` imports them, with the
+        same context as the Import button of that page."""
+        def on_files_for_artist(paths):
+            if self.current_artist is not None:
+                callback(paths, {"artist": self.current_artist["name"]})
+
+        def on_files_for_album(paths):
+            if self.current_album is not None:
+                callback(paths, {
+                    "artist": self.current_album["artist"],
+                    "album": self.current_album["title"],
+                })
+
+        # Not the grid of artists: it has no Import button.
+        enable_file_drop(
+            self.artist_page,
+            on_files_for_artist,
+            accept=lambda: self.current_artist is not None,
+        )
+        enable_file_drop(
+            self.album_page,
+            on_files_for_album,
+            accept=lambda: self.current_album is not None,
+        )
 
     # ------------------------------------------------------------------
     # Navigation from a track's menu

@@ -53,6 +53,7 @@ from melody.services.recent_tracks import select_recent_tracks
 from melody.services.most_played_tracks import select_most_played_tracks
 from melody.services.mpris import MprisService
 from melody.services.keyboard_shortcuts import KeyboardShortcuts
+from melody.services.duplicate_check import find_duplicates
 from melody.views import (
     LibraryView,
     AlbumsView,
@@ -233,6 +234,10 @@ class MelodyWindow(Adw.ApplicationWindow):
         # they import starts out belonging to them.
         for name in ("Albums", "Artists", "Playlists"):
             self.views[name].set_import_callback(self._import_music)
+        # Audio files can be dropped on those same pages, and only on those:
+        # they are the ones with an Import button.
+        for name in ("Library", "Albums", "Artists", "Playlists"):
+            self.views[name].set_drop_callback(self._import_dropped_files)
         set_track_deletion(self._delete_track)
         # The heart next to a track in every list.
         set_favorite_handler(self._toggle_favorite)
@@ -1397,6 +1402,34 @@ class MelodyWindow(Adw.ApplicationWindow):
             lambda source: self._import_from(source, context),
         )
 
+    def _import_dropped_files(self, paths, context=None):
+        """Audio files were dropped on a page that can import music.
+
+        This is the Import button, then "From file", then choosing these
+        files and clicking Open, without the two windows in between: what
+        comes next is the same (the edit window for one file, the preview
+        for several), with the same ``context`` (the album, artist or
+        playlist of the page the files were dropped on).
+        """
+        # Importing writes to the library and the database, which a scan
+        # running at the same time would undo.
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        source = next(
+            (
+                candidate for candidate in get_import_sources()
+                if candidate.kind == "files"
+            ),
+            None,
+        )
+
+        if source is None:
+            return
+
+        self._on_import_files_picked(source, paths, dict(context or {}))
+
     def _show_library_busy(self):
         show_error_dialog(
             self,
@@ -1517,6 +1550,132 @@ class MelodyWindow(Adw.ApplicationWindow):
         )
 
     def _import_tracks(self, pending, earlier_errors=(), playlist_id=None):
+        """Import the pending files: the last step of every way of importing
+        (files, a dropped file, a link, a search).
+
+        Files that look like a track the library already has (or like another
+        file of this same import) are asked about first, since importing one
+        would add the song a second time. See ``_copy_into_library`` for the
+        arguments.
+        """
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        duplicates = find_duplicates(pending, self.tracks)
+
+        if duplicates:
+            self._ask_about_duplicates(
+                pending,
+                duplicates,
+                earlier_errors,
+                playlist_id,
+            )
+            return
+
+        self._copy_into_library(pending, earlier_errors, playlist_id)
+
+    @staticmethod
+    def _describe_duplicate(duplicate):
+        """One line saying which file looks like a duplicate, and of what."""
+        item = duplicate.item
+        name = f"“{item.title}”"
+
+        if item.artist:
+            name += f" by {item.artist}"
+
+        if duplicate.existing is None:
+            return f"{name} (also in this import)"
+
+        album = str(duplicate.existing.get("album") or "").strip()
+
+        if album:
+            return f"{name} (already in your library, on “{album}”)"
+
+        return f"{name} (already in your library)"
+
+    def _ask_about_duplicates(
+            self,
+            pending,
+            duplicates,
+            earlier_errors,
+            playlist_id,
+    ):
+        """Tell the person which files look like tracks they already have, and
+        let them skip those, import everything anyway, or give up."""
+        duplicate_ids = {id(duplicate.item) for duplicate in duplicates}
+        others = [item for item in pending if id(item) not in duplicate_ids]
+
+        shown = 8
+        lines = [
+            self._describe_duplicate(duplicate)
+            for duplicate in duplicates[:shown]
+        ]
+
+        if len(duplicates) > shown:
+            lines.append(f"and {len(duplicates) - shown} more")
+
+        if len(pending) == 1:
+            heading = "Already in your library"
+            body = (
+                f"{lines[0]}.\n\n"
+                "Importing it anyway adds a second copy to your library."
+            )
+        else:
+            heading = "Possible duplicates"
+            body = (
+                "These tracks look like ones you already have:\n\n"
+                + "\n".join(lines)
+                + "\n\nImporting them anyway adds a second copy of each."
+            )
+
+        dialog = Adw.MessageDialog.new(self, heading, body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.set_close_response("cancel")
+
+        if others:
+            # Some files are new: the safe choice is to import only those.
+            dialog.add_response("import", "Import all")
+            dialog.add_response("skip", "Skip duplicates")
+            dialog.set_response_appearance(
+                "skip",
+                Adw.ResponseAppearance.SUGGESTED,
+            )
+            dialog.set_default_response("skip")
+        else:
+            dialog.add_response("import", "Import anyway")
+            dialog.set_default_response("cancel")
+
+        dialog.connect(
+            "response",
+            lambda _dialog, response: self._on_duplicates_response(
+                response,
+                pending,
+                others,
+                earlier_errors,
+                playlist_id,
+            ),
+        )
+        dialog.present()
+
+    def _on_duplicates_response(
+            self,
+            response,
+            pending,
+            others,
+            earlier_errors,
+            playlist_id,
+    ):
+        if response == "import":
+            self._copy_into_library(pending, earlier_errors, playlist_id)
+        elif response == "skip":
+            self._copy_into_library(others, earlier_errors, playlist_id)
+        else:
+            # Nothing is imported: a download waiting in its temporary
+            # folder is not needed any more.
+            self._discard_downloads()
+
+    def _copy_into_library(self, pending, earlier_errors=(), playlist_id=None):
         """Copy the pending files into the library and refresh the pages.
 
         ``earlier_errors`` are files that could not even be read: they are

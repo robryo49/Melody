@@ -25,6 +25,7 @@ from melody.services.collection_actions import (
     track_is_playing,
 )
 from melody.widgets.link_label import make_link
+from melody.widgets.file_drop import enable_file_drop
 from melody.widgets.track_table import (
     DEFAULT_COLUMNS,
     TrackSort,
@@ -178,6 +179,17 @@ class LibraryView(Gtk.Box):
         """
         self.import_button.connect("clicked", lambda _button: callback())
         self.import_button.set_visible(True)
+
+    def set_drop_callback(self, callback):
+        """Let audio files be dropped on the page: ``callback(paths, context)``
+        imports them, as the Import button would.
+
+        Like ``set_import_callback`` this is for the Library page only: the
+        Compilations page is this same view, and without this call nothing can
+        be dropped on it. The whole page takes the files, whether it lists
+        tracks or is still empty.
+        """
+        enable_file_drop(self, lambda paths: callback(paths, {}))
 
     def _build_header(self):
         header = Gtk.Box(

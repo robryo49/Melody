@@ -28,6 +28,8 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Preview before saving:** a single file opens straight in the edit window. Several files open a preview list where each track can be edited before anything is added.
 - **Copied, not moved:** imported files are copied into the music folder and tagged. The originals are left where they are.
 - **Import from a page:** the album, artist and playlist pages have their own Import button. An album page fills in the album and artist, an artist page fills in the artist, and a playlist page adds what is imported to the playlist.
+- **Duplicate check:** before anything is copied, the files are compared with your library (and with each other). Tracks with the same title and artist, and about the same length, are listed in a dialog where you can skip them, import everything anyway, or cancel. The album does not matter, and the length keeps a live version or a remix from being taken for the studio track. It applies to every way of importing.
+- **Drag and drop:** audio files dragged from the file manager onto the Library, an album's page, an artist's page or a playlist's page are imported as if you had used Import, From file, picked them and clicked Open. They get the same starting values as that page's Import button. Only the pages with an Import button take a drop (not Compilations, Favorites, Recent, Most played, the grids, or automatic playlists), and nothing is imported while the library is being scanned.
 
 ### Playback
 
@@ -101,7 +103,7 @@ src/
     import_sources/       where music can be imported from (files, YouTube)
     services/             library scanning, editing, metadata, artwork, playback, MPRIS, keyboard shortcuts
     views/                Library, Albums, Artists, Playlists and Preferences pages
-    widgets/              player bar, edit and import windows, shared controls
+    widgets/              player bar, edit and import windows, shared controls (including file drops)
 ```
 
 ### Adding an import source
@@ -126,5 +128,5 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 - [x] ReplayGain
 - [x] Keyboard shortcuts
 - [ ] Auto-scan
-- [ ] Drag and drop to import
-- [ ] Duplicate check on import
+- [x] Drag and drop to import
+- [x] Duplicate check on import
