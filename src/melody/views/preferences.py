@@ -56,6 +56,20 @@ class PreferencesView(Adw.PreferencesPage):
         self.rescan_row.set_activatable_widget(self.rescan_button)
         group.add(self.rescan_row)
 
+        self.auto_scan_row = Adw.SwitchRow(
+            title="Watch the music folder",
+            subtitle=(
+                "Scan again by itself when music is added to, changed in "
+                "or removed from the folder by hand."
+            ),
+        )
+        self.auto_scan_row.set_active(self.settings.auto_scan_enabled)
+        self.auto_scan_row.connect(
+            "notify::active",
+            self._on_auto_scan_toggled,
+        )
+        group.add(self.auto_scan_row)
+
         self.add(group)
 
     def _create_organization_group(self):
@@ -142,6 +156,9 @@ class PreferencesView(Adw.PreferencesPage):
 
         if not self._on_rescan(done):
             done()
+
+    def _on_auto_scan_toggled(self, row, _pspec):
+        self.settings.auto_scan_enabled = row.get_active()
 
     def _sync_compilation_rows(self):
         enabled = self.settings.compilations_enabled

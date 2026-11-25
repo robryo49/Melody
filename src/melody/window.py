@@ -54,6 +54,7 @@ from melody.services.most_played_tracks import select_most_played_tracks
 from melody.services.mpris import MprisService
 from melody.services.keyboard_shortcuts import KeyboardShortcuts
 from melody.services.duplicate_check import find_duplicates
+from melody.services.library_watcher import LibraryWatcher
 from melody.views import (
     LibraryView,
     AlbumsView,
@@ -330,6 +331,18 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.playback_manager,
             self.player_bar,
         )
+
+        # Music added, changed or removed by hand in the music folder is
+        # noticed, and the library follows (see ``library_watcher``). It is
+        # told when Melody works on the folder itself, which is not a change
+        # to scan for.
+        self.library_watcher = LibraryWatcher(
+            self.library_manager.music_folder,
+            self._on_music_folder_changed,
+        )
+
+        if self.settings.auto_scan_enabled:
+            self.library_watcher.start()
 
         self._update_compilations_ui()
         self.settings.connect_changed(self._on_settings_changed)
@@ -700,6 +713,12 @@ class MelodyWindow(Adw.ApplicationWindow):
             self._select_page("Library")
 
     def _on_settings_changed(self):
+        # Watching the folder can be switched on and off.
+        if self.settings.auto_scan_enabled:
+            self.library_watcher.start()
+        else:
+            self.library_watcher.stop()
+
         # Which tracks go where depends on the settings: sort them out again.
         self._update_compilations_ui()
 
@@ -779,6 +798,8 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _start_library_sync(self):
         self._syncing = True
+        # The scan moves files and writes covers: those changes are its own.
+        self.library_watcher.pause()
         self._sync_thread = threading.Thread(
             target=self._sync_library,
             daemon=True,
@@ -809,6 +830,7 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _finish_sync(self):
         self._syncing = False
+        self.library_watcher.resume()
 
         done, self._rescan_done = self._rescan_done, None
 
@@ -2261,7 +2283,18 @@ class MelodyWindow(Adw.ApplicationWindow):
             if key in album_covers:
                 track["album_artwork_path"] = album_covers[key]
 
+    def _on_music_folder_changed(self):
+        """Something other than Melody added, changed or removed files in the
+        music folder: scan again, so the library (and the pages) follow."""
+        if not self.settings.auto_scan_enabled or self._syncing:
+            return
+
+        self._rescan_library()
+
     def _reload_library_from_database(self, refresh_artwork_ids=()):
+        # Whatever Melody did to the files just before (an edit, an import, a
+        # deletion) is not a change to scan for.
+        self.library_watcher.ignore_for(2.0)
         previous = {track["id"]: track for track in self.tracks}
         tracks = self.database.get_tracks()
         for track in tracks:
@@ -2342,6 +2375,7 @@ class MelodyWindow(Adw.ApplicationWindow):
     def _on_close_request(self, window):
         # A slider moved a moment ago may not have been saved yet.
         self.equalizer.flush()
+        self.library_watcher.stop()
         self.mpris.close()
         self.playback_manager.close()
         self._discard_downloads()

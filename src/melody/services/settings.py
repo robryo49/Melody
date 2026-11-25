@@ -18,6 +18,9 @@ DEFAULTS = {
     # What the Most played page shows: the N most played tracks. Also set in
     # the page's own header.
     "most_played_count": 30.0,
+    # Watch the music folder, and scan it again when files are added, changed
+    # or removed by something else than Melody.
+    "auto_scan_enabled": True,
 }
 
 
@@ -147,6 +150,14 @@ class Settings:
     @most_played_count.setter
     def most_played_count(self, value):
         self.set("most_played_count", value)
+
+    @property
+    def auto_scan_enabled(self) -> bool:
+        return self._values["auto_scan_enabled"]
+
+    @auto_scan_enabled.setter
+    def auto_scan_enabled(self, value):
+        self.set("auto_scan_enabled", value)
 
 
 _settings = None

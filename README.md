@@ -12,6 +12,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Compilations:** long audio files such as mixes and live sets can be kept apart from regular tracks. They get their own page, and the minimum length that makes a file a compilation is configurable.
 - **Singles:** a track with no album is treated as a single and filed in its artist's folder.
 - **Artwork:** covers are read from the files and from image files in the folders, and looked up online when nothing is found locally.
+- **Automatic scan:** the music folder is watched. Music you copy into it by hand, or delete or rename there, is picked up a few seconds after the changes stop, with no need to restart or press Rescan. Like any scan, it files new music under `Artist/Album` according to its tags. Melody's own changes (imports, edits, scans) do not set it off. It can be switched off in Preferences, under "Watch the music folder".
 
 ### Editing
 
@@ -127,6 +128,6 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 - [x] Per-track Equalizer
 - [x] ReplayGain
 - [x] Keyboard shortcuts
-- [ ] Auto-scan
+- [x] Auto-scan
 - [x] Drag and drop to import
 - [x] Duplicate check on import
