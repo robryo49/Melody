@@ -21,7 +21,53 @@ DEFAULTS = {
     # Watch the music folder, and scan it again when files are added, changed
     # or removed by something else than Melody.
     "auto_scan_enabled": True,
+    # Sort files into Artist/Album folders when the library is scanned. What
+    # is imported or edited in Melody is always filed that way.
+    "organize_files": True,
+    # The folder Melody keeps the music in. Empty: the system's Music folder
+    # (see ``default_music_folder``).
+    "music_folder": "",
+    # The audio format a download (YouTube) is saved as: a key of
+    # ``import_formats.IMPORT_FORMATS``.
+    "import_format": "mp3",
 }
+
+
+def system_music_folder() -> Path:
+    """The folder the desktop calls Music: ``~/Musique`` on a French system,
+    ``~/Music`` on an English one."""
+    try:
+        from gi.repository import GLib
+
+        folder = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_MUSIC)
+    except (ImportError, AttributeError):
+        folder = None
+
+    return Path(folder) if folder else Path.home() / "Music"
+
+
+def _is_empty(folder: Path) -> bool:
+    try:
+        return not any(folder.iterdir())
+    except OSError:
+        return True
+
+
+def default_music_folder() -> Path:
+    """Where the music is kept when no other folder was chosen: the system's
+    Music folder.
+
+    Melody used to always use ``~/Musique``. Where that folder holds music and
+    the system's is still empty, it stays the one, so an existing library is
+    not left behind (a scan would then empty it).
+    """
+    folder = system_music_folder()
+    legacy = Path.home() / "Musique"
+
+    if legacy != folder and not _is_empty(legacy) and _is_empty(folder):
+        return legacy
+
+    return folder
 
 
 def default_settings_path() -> Path:
@@ -45,6 +91,11 @@ class Settings:
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be true or false")
             return value
+
+        if isinstance(DEFAULTS[key], str):
+            if not isinstance(value, str):
+                raise ValueError(f"{key} must be text")
+            return value.strip()
 
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be a number")
@@ -158,6 +209,38 @@ class Settings:
     @auto_scan_enabled.setter
     def auto_scan_enabled(self, value):
         self.set("auto_scan_enabled", value)
+
+    @property
+    def organize_files(self) -> bool:
+        return self._values["organize_files"]
+
+    @organize_files.setter
+    def organize_files(self, value):
+        self.set("organize_files", value)
+
+    @property
+    def import_format(self) -> str:
+        return self._values["import_format"]
+
+    @import_format.setter
+    def import_format(self, value):
+        self.set("import_format", value)
+
+    @property
+    def music_folder(self) -> Path:
+        """The folder the music is kept in: the one chosen in Preferences, or
+        else the system's Music folder."""
+        chosen = self._values["music_folder"]
+
+        if chosen:
+            return Path(chosen).expanduser()
+
+        return default_music_folder()
+
+    @music_folder.setter
+    def music_folder(self, value):
+        # None goes back to the system's Music folder.
+        self.set("music_folder", "" if value is None else str(value))
 
 
 _settings = None

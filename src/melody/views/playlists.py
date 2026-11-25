@@ -15,6 +15,10 @@ from melody.services.collection_actions import (
     track_is_playing,
 )
 from melody.services.playlist_artwork import get_playlist_cover
+from melody.services.playlist_categories import (
+    clean_category,
+    same_category,
+)
 from melody.services.track_range import track_length
 from melody.widgets.collection_grid import CollectionGrid
 from melody.widgets.cover_edit_button import with_edit_button
@@ -44,6 +48,12 @@ class PlaylistsView(Gtk.Box):
         self.playback_manager = None
         self._playlist_paths = {}
         self._playlist_covers = {}
+        # The category this page lists (None: the playlists that have none,
+        # in the Playlists page of the sidebar) and the categories last
+        # reported to ``on_categories_changed``.
+        self.category = None
+        self._categories = None
+        self.on_categories_changed = None
         # The column the playlist's track list is sorted by.
         self.track_sort = TrackSort()
 
@@ -128,6 +138,33 @@ class PlaylistsView(Gtk.Box):
         playlist (the edit button over its cover)."""
         self.on_change_image = callback
 
+    def set_categories_callback(self, callback):
+        """``callback(categories)`` is called with the names of the categories
+        in use (A-Z) each time they change, so the sidebar can list them."""
+        self.on_categories_changed = callback
+
+    def set_category(self, category):
+        """List the playlists of ``category`` (None for those that have none).
+
+        Nothing happens when that is what is listed already, so showing the
+        same page again keeps the playlist that is open."""
+        if same_category(category, self.category):
+            return
+
+        self.category = clean_category(category)
+        self.current_playlist = None
+        self.current_tracks = []
+        self.grid_title.set_text(self.category or "Playlists")
+        self.refresh()
+
+    def is_open(self, playlist_id):
+        """True when the page of the playlist with this id is showing."""
+        return (
+            self.current_playlist is not None
+            and self.current_playlist["id"] == playlist_id
+            and self.stack.get_visible_child_name() == "details"
+        )
+
     def library_tracks_of(self, playlist):
         """The playlist's tracks as the library has them, with their artwork
         (what the picture suggestions are made from)."""
@@ -164,9 +201,9 @@ class PlaylistsView(Gtk.Box):
         header.set_margin_end(24)
         header.set_margin_top(16)
 
-        title = Gtk.Label(label="Playlists", xalign=0)
-        title.add_css_class("title-2")
-        title.set_hexpand(True)
+        self.grid_title = Gtk.Label(label="Playlists", xalign=0)
+        self.grid_title.add_css_class("title-2")
+        self.grid_title.set_hexpand(True)
 
         self.count_label = Gtk.Label(label="0 playlists")
         self.count_label.add_css_class("dim-label")
@@ -175,7 +212,7 @@ class PlaylistsView(Gtk.Box):
         # one defined by rules.
         create_button = self._create_add_menu_button()
 
-        header.append(title)
+        header.append(self.grid_title)
         header.append(self.count_label)
         header.append(create_button)
 
@@ -269,33 +306,76 @@ class PlaylistsView(Gtk.Box):
         )
 
         self.playlists = self.database.get_playlists()
+        self._notify_categories()
         self._refresh_grid()
 
-        if not self.playlists:
-            self.current_playlist = None
-            self.current_tracks = []
-            self.stack.set_visible_child_name("empty")
+        # (Showing the sidebar's categories may have switched to another page
+        # and reset this one: then there is no playlist left to reopen.)
+        refreshed = (
+            self.database.get_playlist(self.current_playlist["id"])
+            if details_open and self.current_playlist is not None
+            else None
+        )
 
-        elif details_open:
-            refreshed = self.database.get_playlist(self.current_playlist["id"])
-
-            if refreshed:
-                self._show_playlist(refreshed)
-            else:
-                self.current_playlist = None
-                self.current_tracks = []
-                self.stack.set_visible_child_name("grid")
-
+        if refreshed:
+            self._show_playlist(refreshed)
         else:
             self.current_playlist = None
             self.current_tracks = []
-            self.stack.set_visible_child_name("grid")
+            self._show_grid()
 
         self._update_play_buttons()
 
+    def _visible_playlists(self):
+        """The playlists of the category this page lists."""
+        return [
+            playlist for playlist in self.playlists
+            if same_category(playlist.get("category"), self.category)
+        ]
+
+    def _notify_categories(self):
+        """Tell the sidebar which categories exist, when that changed."""
+        from melody.services.playlist_categories import category_names
+
+        categories = category_names(self.playlists)
+
+        if categories == self._categories:
+            return
+
+        self._categories = categories
+
+        if self.on_categories_changed is not None:
+            self.on_categories_changed(categories)
+
+    def _show_grid(self):
+        """Show the page's playlists, or a note saying there are none."""
+        if self._visible_playlists():
+            self.stack.set_visible_child_name("grid")
+            return
+
+        if self.category is not None:
+            title = f"No playlists in “{self.category}”"
+            description = (
+                "Create a playlist here, or move one in by editing its "
+                "category."
+            )
+        elif self.playlists:
+            title = "No playlists here"
+            description = (
+                "All your playlists are in a category, listed under "
+                "Playlists in the sidebar."
+            )
+        else:
+            title = "No playlists yet"
+            description = "Create playlists to organize your music."
+
+        self.empty_page.set_title(title)
+        self.empty_page.set_description(description)
+        self.stack.set_visible_child_name("empty")
+
     def _refresh_grid(self):
         visible_playlists = sorted(
-            self.playlists,
+            self._visible_playlists(),
             key=lambda playlist: str(playlist.get("name") or "").casefold(),
         )
 
@@ -336,8 +416,8 @@ class PlaylistsView(Gtk.Box):
         )
 
         self.count_label.set_text(
-            f"{len(self.playlists)} "
-            f"playlist{'s' if len(self.playlists) != 1 else ''}"
+            f"{len(visible_playlists)} "
+            f"playlist{'s' if len(visible_playlists) != 1 else ''}"
         )
 
         self._update_play_buttons()
@@ -811,11 +891,11 @@ class PlaylistsView(Gtk.Box):
 
     def _on_create_clicked(self, button):
         if self.on_create_playlist is not None:
-            self.on_create_playlist()
+            self.on_create_playlist(self.category)
 
     def _on_create_automatic_clicked(self, button):
         if self.on_create_automatic is not None:
-            self.on_create_automatic()
+            self.on_create_automatic(self.category)
 
     def _on_rename_clicked(self):
         if (
@@ -867,7 +947,7 @@ class PlaylistsView(Gtk.Box):
         # No playlist is open any more: a refresh must not bring it back.
         self.current_playlist = None
         self.current_tracks = []
-        self.stack.set_visible_child_name("grid")
+        self._show_grid()
 
     @staticmethod
     def _format_duration(duration):

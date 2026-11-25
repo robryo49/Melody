@@ -62,6 +62,9 @@ def show_import_dialog(parent, sources, on_pick):
     window.set_transient_for(parent)
     window.set_modal(True)
     window.set_title("Import music")
+    # Fixed size: the width given here, the height the content needs.
+    window.set_resizable(False)
+    window.set_size_request(420, -1)
     window.set_default_size(420, -1)
 
     toolbar = Adw.ToolbarView()
@@ -140,6 +143,10 @@ def show_link_dialog(
     window.set_transient_for(parent)
     window.set_modal(True)
     window.set_title(source.link_title)
+    # Fixed size: the width given here, the height the content needs (it
+    # grows a little when the progress and its messages appear).
+    window.set_resizable(False)
+    window.set_size_request(460, -1)
     window.set_default_size(460, -1)
 
     toolbar = Adw.ToolbarView()
@@ -195,6 +202,12 @@ def show_link_dialog(
     cancel = threading.Event()
 
     def update_buttons():
+        if state["busy"]:
+            # A field that has the keyboard focus must not be disabled: GTK
+            # would be left with a text field that never learns it lost the
+            # focus ("GtkText - did not receive a focus-out event").
+            window.set_focus(None)
+
         download_button.set_sensitive(
             not state["busy"] and source.accepts(entry.get_text())
         )
@@ -240,6 +253,8 @@ def show_link_dialog(
             progress.set_visible(False)
             show_status(error, error=True)
             update_buttons()
+            # Ready for another try.
+            entry.grab_focus()
             return GLib.SOURCE_REMOVE
 
         state["done"] = True
@@ -288,9 +303,10 @@ def show_link_dialog(
     toolbar.set_content(content)
     window.set_content(toolbar)
     window.present()
-    entry.grab_focus()
 
     if initial_url:
+        # The download starts at once: nothing to type, and a field that has
+        # the focus cannot be disabled (see ``update_buttons``).
         entry.set_text(initial_url)
 
         def start_now():
@@ -298,6 +314,8 @@ def show_link_dialog(
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(start_now)
+    else:
+        entry.grab_focus()
 
 
 # ----------------------------------------------------------------------
@@ -399,6 +417,9 @@ def show_search_dialog(parent, source, on_pick):
     window.set_transient_for(parent)
     window.set_modal(True)
     window.set_title(source.search_title)
+    # Fixed size: the results scroll inside it.
+    window.set_resizable(False)
+    window.set_size_request(560, 640)
     window.set_default_size(560, 640)
 
     toolbar = Adw.ToolbarView()
@@ -557,6 +578,9 @@ def show_search_dialog(parent, source, on_pick):
         if row is None:
             return
 
+        # Closing a window with a text field that still has the focus makes
+        # GTK warn that it never lost it.
+        window.set_focus(None)
         window.close()
         on_pick(row.result)
 
@@ -725,12 +749,19 @@ class _PendingRow(Gtk.ListBoxRow):
         self.thumbnail.set_pixel_size(THUMBNAIL_SIZE)
 
 
-def show_import_preview(parent, pending, library_tracks, on_save):
+def show_import_preview(
+        parent,
+        pending,
+        library_tracks,
+        on_save,
+        replaygain=False,
+):
     """Show the files about to be imported, each with an edit button.
 
     ``pending`` is a list of ``PendingTrack``; editing one changes it in
     place. Save closes the window and calls ``on_save(pending)``; Cancel (or
-    closing the window) imports nothing.
+    closing the window) imports nothing. With ``replaygain`` the edit window
+    of each track has its ReplayGain slider.
     """
     library_tracks = list(library_tracks)
 
@@ -738,6 +769,9 @@ def show_import_preview(parent, pending, library_tracks, on_save):
     window.set_transient_for(parent)
     window.set_modal(True)
     window.set_title(f"Import {len(pending)} tracks")
+    # Fixed size: the list of files scrolls inside it.
+    window.set_resizable(False)
+    window.set_size_request(760, 520)
     window.set_default_size(760, 520)
 
     toolbar = Adw.ToolbarView()
@@ -782,6 +816,7 @@ def show_import_preview(parent, pending, library_tracks, on_save):
                 "copied into your library, named after its title, artist "
                 "and album, when you save."
             ),
+            replaygain=replaygain,
         )
 
     for item in pending:

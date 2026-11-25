@@ -30,6 +30,13 @@ from melody.services.replaygain import (
 # cancelled (nanoseconds, as GStreamer wants it).
 _POLL = 200 * Gst.MSECOND
 
+# The loudness every track is brought to, in dB: ReplayGain's standard
+# reference (roughly -14 LUFS). It is always the same one, set here rather
+# than left to GStreamer's default, so the gains of every analysis (tracks
+# analysed today, a download measured next year) are comparable and can be
+# mixed freely.
+REFERENCE_LEVEL = 89.0
+
 
 class AnalysisError(Exception):
     """A file could not be analysed."""
@@ -84,6 +91,8 @@ def analyse_file(path, should_stop=lambda: False):
     source, decode, convert, resample, analysis, sink = elements
 
     source.set_property("location", str(path))
+    # Always the same reference level (see ``REFERENCE_LEVEL``).
+    analysis.set_property("reference-level", REFERENCE_LEVEL)
     # Analyse even a file that already has tags: that is what was asked for.
     analysis.set_property("forced", True)
     # One track, so its result is final as soon as the file ends.
@@ -156,6 +165,54 @@ def default_workers():
     """How many files to analyse at once: a few, leaving a core free for the
     rest of the computer."""
     return max(1, min(4, (os.cpu_count() or 2) - 1))
+
+
+def measure_files(
+        paths,
+        *,
+        progress=None,
+        should_stop=lambda: False,
+        workers=None,
+):
+    """Measure the loudness of the files at ``paths``, without changing them.
+
+    Returns ``{path: (gain, peak)}`` for the files that could be measured
+    (``path`` is the very object that was given). ``progress(done, total)``
+    is called (from the worker threads) as each file is dealt with, and once
+    ``should_stop()`` is True the rest is dropped. A file that cannot be
+    measured is simply left out.
+    """
+    paths = list(paths)
+    total = len(paths)
+    results = {}
+    lock = threading.Lock()
+    finished = [0]
+
+    def deal_with(path):
+        if should_stop():
+            return
+
+        try:
+            found = analyse_file(path, should_stop)
+        except Cancelled:
+            return
+        except Exception:
+            found = None
+
+        with lock:
+            if found is not None:
+                results[path] = found
+
+            finished[0] += 1
+            done = finished[0]
+
+        if progress is not None:
+            progress(done, total)
+
+    with ThreadPoolExecutor(max_workers=workers or default_workers()) as pool:
+        list(pool.map(deal_with, paths))
+
+    return results
 
 
 def analyse_tracks(

@@ -29,6 +29,12 @@ class PendingTrack:
     start_time: float | None = None
     end_time: float | None = None
     kind: str | None = None
+    # The track's ReplayGain, in dB, to write into its file when it is
+    # imported (None: leave the file's tags alone), and the loudest sample
+    # that goes with it. Measured when ReplayGain is on (see the window's
+    # ``_measure_pending``), and changeable in the edit window.
+    replaygain: float | None = None
+    replaygain_peak: float | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> "PendingTrack":
@@ -113,6 +119,7 @@ class PendingTrack:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "kind": self.kind,
+            "replaygain": self.replaygain,
         }
 
     def apply(self, values: dict):
@@ -137,6 +144,9 @@ class PendingTrack:
 
         if "kind" in values:
             self.kind = values["kind"]
+
+        if "replaygain" in values:
+            self.replaygain = values["replaygain"]
 
 
 def load_pending_tracks(paths) -> tuple[list[PendingTrack], list[str]]:

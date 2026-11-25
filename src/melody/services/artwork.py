@@ -1182,6 +1182,78 @@ def get_itunes_album_image(artist: str, album: str) -> bytes | None:
     return None
 
 
+def get_deezer_track_image(artist: str, title: str) -> bytes | None:
+    """The cover of the release a song is on, from Deezer's search for the
+    song itself (for a single, which has no album to search for)."""
+    url = DEEZER_URL + "/search/track?" + urlencode({
+        "q": f'artist:"{artist}" track:"{title}"',
+        "limit": 10,
+    })
+
+    response = json.loads(_http_get(url))
+
+    for result in response.get("data", []):
+        if not _album_result_matches(
+                (result.get("artist") or {}).get("name", ""),
+                result.get("title", ""),
+                artist,
+                title,
+        ):
+            continue
+
+        album = result.get("album") or {}
+        image_url = (
+                album.get("cover_xl")
+                or album.get("cover_big")
+                or album.get("cover_medium")
+        )
+
+        if not image_url:
+            continue
+
+        try:
+            return _download_image(image_url)
+        except (OSError, ValueError, URLError, HTTPError):
+            continue
+
+    return None
+
+
+def get_itunes_track_image(artist: str, title: str) -> bytes | None:
+    """The cover of the release a song is on, from iTunes' search for the
+    song itself."""
+    url = ITUNES_URL + "?" + urlencode({
+        "term": f"{artist} {title}",
+        "entity": "song",
+        "limit": 10,
+    })
+
+    response = json.loads(_http_get(url))
+
+    for result in response.get("results", []):
+        if not _album_result_matches(
+                result.get("artistName", ""),
+                result.get("trackName", ""),
+                artist,
+                title,
+        ):
+            continue
+
+        image_url = result.get("artworkUrl100")
+
+        if not image_url:
+            continue
+
+        image_url = image_url.replace("100x100bb", "1000x1000bb")
+
+        try:
+            return _download_image(image_url)
+        except (OSError, ValueError, URLError, HTTPError):
+            continue
+
+    return None
+
+
 # ----------------------------------------------------------------------
 # YouTube, through yt-dlp (which Melody already uses to import audio)
 # ----------------------------------------------------------------------

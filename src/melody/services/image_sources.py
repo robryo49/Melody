@@ -170,6 +170,33 @@ def album_sources(artist: str, album: str) -> list[ImageSource]:
     ]
 
 
+def track_sources(artist: str, title: str) -> list[ImageSource]:
+    """Covers found by searching for the song itself: Deezer and iTunes.
+
+    They work for a single too, which has no album to search for. The cover
+    is that of the release the song is on, so it is often the album's.
+    """
+    artist = (artist or "").strip()
+    title = (title or "").strip()
+
+    return [
+        ImageSource(
+            "Deezer (song)",
+            _unless_unknown(
+                lambda: artwork.get_deezer_track_image(artist, title),
+                artist, title,
+            ),
+        ),
+        ImageSource(
+            "iTunes (song)",
+            _unless_unknown(
+                lambda: artwork.get_itunes_track_image(artist, title),
+                artist, title,
+            ),
+        ),
+    ]
+
+
 def _youtube(name: str):
     """The function ``name`` of ``youtube_images``, or ``None`` when this
     build leaves the YouTube search out."""
@@ -194,7 +221,9 @@ def track_search(
         library_tracks=(),
 ) -> ImageSearch:
     """Images for a track: the thumbnails of its music video on YouTube,
-    searched as "title artist", and the cover of its album.
+    searched as "title artist"; suggestions from other sites, both for its
+    album (when it has one) and for the song itself (so a single has some
+    too); and the cover of its album.
 
     The values are those in the edit window, not the track's own: they may
     have been changed there without being saved yet. The album artist is
@@ -218,7 +247,7 @@ def track_search(
             album_sources(artist, album)
             if album and not _is_unknown(album)
             else []
-        ),
+        ) + track_sources(artist, title),
         shortcut=shortcut,
     )
 

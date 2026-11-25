@@ -5,6 +5,7 @@ from pathlib import Path
 from melody.database import Database
 from melody.services.library_scanner import scan_library
 from melody.services.organizer import organize_file, OrganizationError
+from melody.services.settings import default_music_folder
 
 
 @dataclass
@@ -25,12 +26,18 @@ class LibraryManager:
             database: Database | None = None,
     ):
         self.music_folder = Path(
-            music_folder or Path.home() / "Musique"
+            music_folder or default_music_folder()
         ).expanduser().resolve()
 
         self.database = database or Database()
 
-    def sync(self) -> SyncReport:
+    def sync(self, organize: bool = True) -> SyncReport:
+        """Bring the database up to date with the music folder.
+
+        With ``organize``, every file that is not where its tags say it
+        belongs (``Artist/Album/Title``) is moved there. Without it the files
+        stay exactly where they are.
+        """
         report = SyncReport()
 
         if not self.music_folder.is_dir():
@@ -58,7 +65,8 @@ class LibraryManager:
             final_path = original_path
 
             try:
-                final_path = organize_file(entry, self.music_folder)
+                if organize:
+                    final_path = organize_file(entry, self.music_folder)
 
             except OrganizationError as error:
                 report.errors.append(str(error))

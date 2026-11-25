@@ -17,6 +17,7 @@ from melody.services.collection_actions import (
     show_error_dialog,
     show_merge_confirmation,
     show_playlist_picker_dialog,
+    show_new_playlist_dialog,
     show_text_dialog,
     show_set_album_dialog,
     show_set_artist_dialog,
@@ -48,6 +49,10 @@ from melody.services.playlist_artwork import (
     get_playlist_cover,
     set_playlist_cover,
 )
+from melody.services.playlist_categories import (
+    clean_category,
+    same_category,
+)
 from melody.services.playback_manager import PlaybackManager
 from melody.services.recent_tracks import select_recent_tracks
 from melody.services.most_played_tracks import select_most_played_tracks
@@ -68,14 +73,25 @@ from melody.views import (
 from melody.services.compilations import is_compilation
 from melody.services.settings import get_settings
 from melody.services.equalizer import get_equalizer
+from melody.services.library_search import artist_name
+from melody.services.replaygain_analysis import (
+    analyse_tracks,
+    analysis_available,
+    measure_files,
+)
 from melody.services.replaygain import (
     ReplayGainError,
     read_track_gain,
+    supports_replaygain,
     write_track_gain,
 )
 from melody.import_sources import get_import_sources
 from melody.services.metadata import MetadataError
 from melody.widgets.image_picker import show_image_picker
+from melody.widgets.measuring_dialog import show_measuring_dialog
+from melody.widgets.replaygain_analysis_dialog import (
+    show_replaygain_analysis_dialog,
+)
 from melody.widgets.automatic_playlist_dialog import (
     show_automatic_playlist_dialog,
 )
@@ -107,6 +123,10 @@ class MelodyWindow(Adw.ApplicationWindow):
         # arrows of the sidebar, and where the current one is in that list.
         self._history = []
         self._history_index = -1
+        # The sub-menu under Playlists in the sidebar: the categories it lists
+        # now, and the page being shown (see ``_select_page``).
+        self._playlist_categories = None
+        self._current_page = ""
         self._sync_thread = None
         # True while a library scan is running; ``_rescan_done`` is told when
         # the scan a Preferences "Rescan" button started is over.
@@ -116,7 +136,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         # imported (see ``_discard_downloads``).
         self._downloads = []
         self.playback_manager = PlaybackManager()
-        self.library_manager = LibraryManager()
+        self.library_manager = LibraryManager(get_settings().music_folder)
         self.database = self.library_manager.database
         self.library_editor = LibraryEditor(
             self.library_manager.music_folder,
@@ -309,6 +329,11 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Playlists"].set_image_callback(
             self._change_playlist_image,
         )
+        # The categories of the playlists are listed under Playlists in the
+        # sidebar.
+        self.views["Playlists"].set_categories_callback(
+            self._update_playlist_categories,
+        )
 
         self.navigation_rows = {}
 
@@ -346,6 +371,12 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self._update_compilations_ui()
         self.settings.connect_changed(self._on_settings_changed)
+
+        # The categories already known are in the sidebar from the start,
+        # before the first scan has filled the Playlists page.
+        self._update_playlist_categories(
+            self.database.get_playlist_categories()
+        )
 
         self._select_page("Library")
         self._start_library_sync()
@@ -480,14 +511,15 @@ class MelodyWindow(Adw.ApplicationWindow):
         return Adw.NavigationPage.new(toolbar, "Navigation")
 
     @staticmethod
-    def _create_navigation_row(title, icon):
+    def _create_navigation_row(title, icon, indent=False):
         row = Gtk.ListBoxRow()
 
         content = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=12,
         )
-        content.set_margin_start(12)
+        # A row of the sub-menu under Playlists sits further in.
+        content.set_margin_start(30 if indent else 12)
         content.set_margin_end(12)
         content.set_margin_top(8)
         content.set_margin_bottom(8)
@@ -684,7 +716,48 @@ class MelodyWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _show_preferences(self):
-        show_preferences_dialog(self, self.settings, self._rescan_library)
+        show_preferences_dialog(
+            self,
+            self.settings,
+            self._rescan_library,
+            self._change_music_folder,
+        )
+
+    def _change_music_folder(self, folder, done=None):
+        """Make ``folder`` the music folder, and scan it.
+
+        Tracks whose file is in the new folder too, at the same place (the
+        music was moved or copied there), stay the same tracks. The others
+        leave the library when the scan finds them missing. ``done()`` is
+        called when that scan is over.
+
+        False (and nothing changed) when a scan is already running.
+        """
+        if self._syncing:
+            return False
+
+        folder = Path(folder).expanduser().resolve()
+
+        try:
+            self.database.rebase_paths(
+                self.library_manager.music_folder,
+                folder,
+            )
+        except Exception as error:
+            show_error_dialog(self, "Could not change the music folder", error)
+            return False
+
+        self.library_manager.music_folder = folder
+        self.library_editor.music_folder = folder
+        self.library_watcher.set_folder(folder)
+
+        # What was playing came from the old folder.
+        self.playback_manager.stop()
+        self.player_bar.set_track(None)
+
+        self.settings.music_folder = folder
+        self._rescan_library(done)
+        return True
 
     def _apply_equalizer(self):
         """Give the player the equalizer's gains (all zeros while it is off)
@@ -699,7 +772,219 @@ class MelodyWindow(Adw.ApplicationWindow):
             self,
             self.equalizer,
             available=self.playback_manager.has_equalizer,
+            analyse=self._analyse_replaygain,
         )
+
+    # ------------------------------------------------------------------
+    # ReplayGain analysis
+    # ------------------------------------------------------------------
+
+    def _analyse_replaygain(self, parent):
+        """The "Analyse…" button of the equalizer window: choose what to
+        analyse, then measure it and set the ReplayGain of those tracks."""
+        if not analysis_available():
+            show_error_dialog(
+                parent,
+                "Analysis unavailable",
+                Exception(
+                    "GStreamer's ReplayGain analysis plugin (rganalysis) was "
+                    "not found. It is part of gst-plugins-good: install that "
+                    "package, then restart Melody."
+                ),
+            )
+            return
+
+        # The files are rewritten, which a scan running at the same time
+        # would trip over.
+        if self._syncing:
+            show_error_dialog(
+                parent,
+                "The library is busy",
+                Exception(
+                    "Wait for the library scan to finish, then try again."
+                ),
+            )
+            return
+
+        show_replaygain_analysis_dialog(
+            parent,
+            self._analysis_scopes(),
+            self._run_analysis,
+        )
+
+    def _analysis_scopes(self):
+        """What the analysis window offers, in order. Each one gives the tracks
+        when asked (a scope with ``choices`` lists what to pick from first)."""
+        scopes = [
+            {"title": "All tracks", "tracks": lambda: list(self.tracks)},
+        ]
+
+        # With compilations off there is no difference between "all" and
+        # "library", nor any compilation to speak of.
+        if self.settings.compilations_enabled:
+            scopes.append({
+                "title": "Library",
+                "tracks": lambda: [
+                    track for track in self.tracks
+                    if not is_compilation(track)
+                ],
+            })
+            scopes.append({
+                "title": "Compilations",
+                "tracks": lambda: [
+                    track for track in self.tracks if is_compilation(track)
+                ],
+            })
+
+        scopes.extend([
+            {
+                "title": "Favorites",
+                "tracks": lambda: [
+                    track for track in self.tracks if track.get("favorite")
+                ],
+            },
+            {
+                "title": "Recent",
+                "tracks": lambda: self._select_recent_tracks(self.tracks),
+            },
+            {
+                "title": "Most played",
+                "tracks": lambda: self._select_most_played_tracks(
+                    self.tracks
+                ),
+            },
+            {
+                "title": "Albums",
+                "choices": self._album_choices,
+                "search_placeholder": "Search albums…",
+            },
+            {
+                "title": "Artists",
+                "choices": self._artist_choices,
+                "search_placeholder": "Search artists…",
+            },
+            {
+                "title": "Playlists",
+                "choices": self._playlist_choices,
+                "search_placeholder": "Search playlists…",
+            },
+        ])
+
+        return scopes
+
+    @staticmethod
+    def _count_text(count):
+        return f"{count} track{'s' if count != 1 else ''}"
+
+    def _album_choices(self):
+        """Every album, A-Z, with its tracks."""
+        albums = {}
+
+        for track in self.tracks:
+            title = str(track.get("album") or "").strip()
+
+            if not title:
+                continue
+
+            artist = artist_name(track)
+            entry = albums.setdefault(
+                (artist.casefold(), title.casefold()),
+                {"title": title, "artist": artist, "tracks": []},
+            )
+            entry["tracks"].append(track)
+
+        return [
+            {
+                "title": entry["title"],
+                "subtitle": (
+                    f"{entry['artist']} · {self._count_text(len(entry['tracks']))}"
+                ),
+                "tracks": entry["tracks"],
+            }
+            for entry in sorted(
+                albums.values(),
+                key=lambda entry: (
+                    entry["title"].casefold(),
+                    entry["artist"].casefold(),
+                ),
+            )
+        ]
+
+    def _artist_choices(self):
+        """Every artist, A-Z, with all their tracks."""
+        artists = {}
+
+        for track in self.tracks:
+            name = artist_name(track)
+            entry = artists.setdefault(
+                name.casefold(),
+                {"title": name, "tracks": []},
+            )
+            entry["tracks"].append(track)
+
+        return [
+            {
+                "title": entry["title"],
+                "subtitle": self._count_text(len(entry["tracks"])),
+                "tracks": entry["tracks"],
+            }
+            for entry in sorted(
+                artists.values(),
+                key=lambda entry: entry["title"].casefold(),
+            )
+        ]
+
+    def _playlist_choices(self):
+        """Every playlist, A-Z (its tracks are only looked up if picked)."""
+        playlists_view = self.views["Playlists"]
+
+        return [
+            {
+                "title": str(playlist.get("name") or ""),
+                "subtitle": self._count_text(playlist.get("track_count", 0)),
+                "tracks": (
+                    lambda playlist=playlist:
+                    playlists_view.library_tracks_of(playlist)
+                ),
+            }
+            for playlist in sorted(
+                self.database.get_playlists(),
+                key=lambda playlist: str(playlist.get("name") or "").casefold(),
+            )
+        ]
+
+    def _run_analysis(self, tracks, skip_tagged, progress, should_stop):
+        """Analyse ``tracks`` (called in a thread of its own by the analysis
+        window), then let the player pick up a changed tag."""
+        # Tagging hundreds of files is not a change to scan for.
+        GLib.idle_add(self._pause_library_watcher)
+
+        try:
+            summary = analyse_tracks(
+                tracks,
+                skip_tagged=skip_tagged,
+                progress=progress,
+                should_stop=should_stop,
+            )
+        finally:
+            GLib.idle_add(self._resume_library_watcher)
+
+        # The track being played may have been tagged just now.
+        GLib.idle_add(self._refresh_replaygain_once)
+        return summary
+
+    def _pause_library_watcher(self):
+        self.library_watcher.pause()
+        return GLib.SOURCE_REMOVE
+
+    def _resume_library_watcher(self):
+        self.library_watcher.ignore_for(2.0)
+        self.library_watcher.resume()
+        return GLib.SOURCE_REMOVE
+
+    def _refresh_replaygain_once(self):
+        self.playback_manager.refresh_replaygain()
+        return GLib.SOURCE_REMOVE
 
     def _update_compilations_ui(self):
         """The Compilations page only exists while compilations are enabled."""
@@ -724,6 +1009,52 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
             self.views[name].set_tracks(self.tracks)
+
+    def _update_playlist_categories(self, categories):
+        """The sub-menu under Playlists: one row for each category of
+        playlists, A-Z. The page of a category lists the playlists filed
+        under it (see ``_select_page``)."""
+        categories = list(categories)
+
+        if categories == self._playlist_categories:
+            return
+
+        self._playlist_categories = categories
+
+        for name in [
+            name for name in self.navigation_rows
+            if name.startswith("Playlists/")
+        ]:
+            self.navigation_list.remove(self.navigation_rows.pop(name))
+
+        index = self.navigation_rows["Playlists"].get_index() + 1
+
+        for category in categories:
+            row = self._create_navigation_row(
+                category,
+                "folder-symbolic",
+                indent=True,
+            )
+            self.navigation_rows[f"Playlists/{category}"] = row
+            self.navigation_list.insert(row, index)
+            index += 1
+
+        current = self._current_page
+
+        if current.startswith("Playlists/") and (
+                current not in self.navigation_rows
+        ):
+            # The category being shown has no playlist left.
+            self._select_page("Playlists")
+        elif current in self.navigation_rows:
+            # Taking the rows out may have cleared the selection.
+            self.navigation_list.select_row(self.navigation_rows[current])
+
+    def _playlist_page(self, playlist):
+        """The page of the sidebar that lists ``playlist``: Playlists, or its
+        category's."""
+        category = clean_category(playlist.get("category"))
+        return f"Playlists/{category}" if category else "Playlists"
 
     def _on_navigation_selected(self, list_box, row):
         if row is None:
@@ -772,12 +1103,20 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _select_page(self, name):
         self._record_page(name)
-        self.content_stack.set_visible_child_name(name.lower())
+        self._current_page = name
+
+        # A category of playlists is a page of the sidebar of its own, named
+        # "Playlists/<category>": the Playlists view lists its playlists.
+        page, _, category = name.partition("/")
+
+        self.content_stack.set_visible_child_name(page.lower())
         self.content_header.set_title_widget(
-            Gtk.Label(label=name)
+            Gtk.Label(label=category or page)
         )
 
-        if name == "Playlists":
+        if page == "Playlists":
+            self.views["Playlists"].set_category(category or None)
+
             # Plays, favorites and imports since the page was last shown may
             # have changed what the automatic playlists select.
             self.views["Playlists"].refresh_automatic()
@@ -855,7 +1194,9 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _sync_library(self):
         try:
-            report = self.library_manager.sync()
+            report = self.library_manager.sync(
+                organize=self.settings.organize_files,
+            )
             tracks = self.database.get_tracks()
 
             album_artwork = {}
@@ -1052,11 +1393,15 @@ class MelodyWindow(Adw.ApplicationWindow):
         shown = False
 
         if kind == "playlist":
-            page = "Playlists"
+            playlist = self.database.get_playlist(source["key"])
+            # A playlist in a category is on that category's page.
+            page = self._playlist_page(playlist) if playlist else "Playlists"
             # Shown first: showing the page refreshes the automatic playlists,
             # which would rebuild the rows the view is about to scroll to.
             self._select_page(page)
-            shown = self.views[page].view_playlist(source["key"], track)
+            shown = self.views["Playlists"].view_playlist(
+                source["key"], track,
+            )
         elif kind == "album":
             page = "Albums"
             shown = self.views[page].view_album(ids, track)
@@ -1536,6 +1881,57 @@ class MelodyWindow(Adw.ApplicationWindow):
                 album=context.get("album"),
             )
 
+        # With ReplayGain on, each track's loudness is measured first, so
+        # its edit window starts from a ReplayGain that evens it out.
+        self._measure_pending(
+            pending,
+            lambda: self._show_pending_review(pending, errors, context),
+        )
+
+    def _measure_pending(self, pending, then):
+        """Measure the loudness of the tracks about to be imported, when
+        ReplayGain is on, then call ``then()``.
+
+        Each measured track gets its ReplayGain set from it (the person can
+        still change it in the edit window). A track that is already tagged
+        keeps its own, and one in a format that cannot hold the tag (Opus) is
+        left alone. Without the analysis plugin nothing is measured.
+        """
+        if not self.equalizer.replaygain_enabled or not analysis_available():
+            then()
+            return
+
+        todo = [
+            item for item in pending
+            if supports_replaygain(item.path)
+            and read_track_gain(item.path) is None
+        ]
+
+        if not todo:
+            then()
+            return
+
+        def run(progress, should_stop):
+            return measure_files(
+                [item.path for item in todo],
+                progress=progress,
+                should_stop=should_stop,
+            )
+
+        def done(measured):
+            for item in todo:
+                found = measured.get(item.path)
+
+                if found is not None:
+                    item.replaygain, item.replaygain_peak = found
+
+            then()
+
+        show_measuring_dialog(self, len(todo), run, done)
+
+    def _show_pending_review(self, pending, errors, context):
+        """The windows that show what is about to be imported (see
+        ``_review_pending_tracks``)."""
         playlist_id = context.get("playlist_id")
 
         if len(pending) == 1:
@@ -1559,6 +1955,7 @@ class MelodyWindow(Adw.ApplicationWindow):
                     "for a single: it is then kept in the artist's folder."
                 ),
                 allow_unchanged=True,
+                replaygain=self.equalizer.replaygain_enabled,
             )
             return
 
@@ -1569,6 +1966,7 @@ class MelodyWindow(Adw.ApplicationWindow):
             pending,
             self.tracks,
             lambda items: self._import_tracks(items, errors, playlist_id),
+            replaygain=self.equalizer.replaygain_enabled,
         )
 
     def _import_tracks(self, pending, earlier_errors=(), playlist_id=None):
@@ -1720,6 +2118,8 @@ class MelodyWindow(Adw.ApplicationWindow):
                     start_time=item.start_time,
                     end_time=item.end_time,
                     kind=item.kind,
+                    replaygain=item.replaygain,
+                    replaygain_peak=item.replaygain_peak,
                 )
             except Exception as error:
                 errors.append(str(error))
@@ -1777,53 +2177,114 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         show_text_dialog(self, "Create playlist", "Choose a name for the new playlist.", "", create)
 
-    def _create_playlist(self):
-        def create(name):
+    def _create_playlist(self, category=None):
+        """A new playlist, its tracks picked by hand. ``category`` is the one
+        the page it is made from lists, which the category field starts with.
+        """
+        def create(values):
             try:
-                playlist_id = self.database.create_playlist(name)
-                self.views["Playlists"].refresh()
-                playlist = self.database.get_playlist(playlist_id)
-                if playlist:
-                    self.views["Playlists"]._show_playlist(playlist)
-            except Exception as error:
-                show_error_dialog(self, "Could not create playlist", error)
-
-        show_text_dialog(self, "Create playlist", "Choose a name for the new playlist.", "", create)
-
-    def _create_automatic_playlist(self):
-        def save(name, rules):
-            try:
-                playlist_id = self.database.create_automatic_playlist(
-                    name, rules,
+                playlist_id = self.database.create_playlist(
+                    values["name"],
+                    values["category"] or None,
                 )
             except Exception as error:
                 show_error_dialog(self, "Could not create playlist", error)
                 return
 
-            self.views["Playlists"].refresh()
-            playlist = self.database.get_playlist(playlist_id)
+            self._open_playlist_page(playlist_id)
 
-            if playlist:
-                self.views["Playlists"]._show_playlist(playlist)
+        show_new_playlist_dialog(
+            self,
+            self.database.get_playlist_categories(),
+            category,
+            create,
+        )
 
-        show_automatic_playlist_dialog(self, None, self.tracks, save)
+    def _open_playlist_page(self, playlist_id):
+        """Show a playlist's page, within the page of the sidebar that lists
+        it (Playlists, or its category's)."""
+        view = self.views["Playlists"]
+        # First, so the sidebar has the playlist's category by then.
+        view.refresh()
+        playlist = self.database.get_playlist(playlist_id)
+
+        if playlist is None:
+            return
+
+        self._select_page(self._playlist_page(playlist))
+        view._show_playlist(playlist)
+
+    def _finish_playlist_edit(self, playlist_id, moved):
+        """Bring the Playlists page up to date after an edit. When the edit
+        changed the playlist's category (``moved``), go to the page of its new
+        category, with the playlist open if it was."""
+        view = self.views["Playlists"]
+        reopen = view.is_open(playlist_id)
+        view.refresh()
+
+        if not moved:
+            return
+
+        playlist = self.database.get_playlist(playlist_id)
+
+        if playlist is None:
+            return
+
+        self._select_page(self._playlist_page(playlist))
+
+        if reopen:
+            view._show_playlist(playlist)
+
+    def _create_automatic_playlist(self, category=None):
+        def save(name, rules, chosen_category):
+            try:
+                playlist_id = self.database.create_automatic_playlist(
+                    name, rules, chosen_category,
+                )
+            except Exception as error:
+                show_error_dialog(self, "Could not create playlist", error)
+                return
+
+            self._open_playlist_page(playlist_id)
+
+        show_automatic_playlist_dialog(
+            self,
+            None,
+            self.tracks,
+            save,
+            categories=self.database.get_playlist_categories(),
+            default_category=category,
+        )
 
     def _edit_automatic_playlist(self, playlist):
         """Change the name and the rules of an automatic playlist. Its picture
         is changed like any playlist's, with the edit button over its cover."""
-        def save(name, rules):
+        def save(name, rules, category):
+            moved = not same_category(category, playlist.get("category"))
+
             try:
                 if name != playlist["name"]:
                     self.database.rename_playlist(playlist["id"], name)
 
                 self.database.set_playlist_rules(playlist["id"], rules)
+
+                if moved:
+                    self.database.set_playlist_category(
+                        playlist["id"], category,
+                    )
             except Exception as error:
                 show_error_dialog(self, "Could not edit playlist", error)
                 return
 
-            self.views["Playlists"].refresh()
+            self._finish_playlist_edit(playlist["id"], moved)
 
-        show_automatic_playlist_dialog(self, playlist, self.tracks, save)
+        show_automatic_playlist_dialog(
+            self,
+            playlist,
+            self.tracks,
+            save,
+            categories=self.database.get_playlist_categories(),
+        )
 
     def _edit_playlist(self, playlist):
         if playlist.get("automatic"):
@@ -1832,11 +2293,19 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         def save(values):
             image = values.get("image")
+            moved = not same_category(
+                values["category"], playlist.get("category"),
+            )
 
             try:
                 if values["name"] != playlist["name"]:
                     self.database.rename_playlist(
                         playlist["id"], values["name"],
+                    )
+
+                if moved:
+                    self.database.set_playlist_category(
+                        playlist["id"], values["category"],
                     )
             except Exception as error:
                 show_error_dialog(self, "Could not edit playlist", error)
@@ -1850,13 +2319,14 @@ class MelodyWindow(Adw.ApplicationWindow):
                         self, "Could not change the playlist's image", error,
                     )
 
-            self.views["Playlists"].refresh()
+            self._finish_playlist_edit(playlist["id"], moved)
 
         show_edit_playlist_dialog(
             self,
             playlist,
             self.views["Playlists"].cover_for(playlist),
             save,
+            categories=self.database.get_playlist_categories(),
         )
 
     def _change_playlist_image(self, playlist):

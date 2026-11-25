@@ -14,6 +14,7 @@ from melody.services.artwork_editor import (
 )
 from melody.services.library_scanner import SUPPORTED_EXTENSIONS, _sanitize_name
 from melody.services.metadata import MetadataError, TrackMetadata, write_metadata
+from melody.services.replaygain import ReplayGainError, write_track_gain
 
 
 # Images Melody reads from an album's folder (see services/artwork.py).
@@ -482,6 +483,8 @@ class LibraryEditor:
             start_time: float | None = None,
             end_time: float | None = None,
             kind: str | None = None,
+            replaygain: float | None = None,
+            replaygain_peak: float | None = None,
     ) -> dict:
         """Add an audio file to the library as a new track.
 
@@ -493,7 +496,8 @@ class LibraryEditor:
 
         ``image`` (raw bytes) is embedded as the track's cover, and
         ``start_time`` / ``end_time`` / ``kind`` are stored like the edit
-        window does.
+        window does. ``replaygain`` (dB, with the track's ``replaygain_peak``)
+        is written into the copy's tags.
 
         Returns ``{"id": the new track's id, "errors": [...]}``; the errors
         are about the extras (cover, range, kind), which the track can do
@@ -532,10 +536,24 @@ class LibraryEditor:
         )
         self._inside_library(destination)
 
+        # Problems with the ReplayGain, which the import can do without.
+        gain_errors = []
+
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
             write_metadata(destination, metadata)
+
+            # Written before the file is measured below, so the library
+            # records the file as it ends up. The track can do without it:
+            # a failure is reported, it does not undo the import.
+            if replaygain is not None:
+                try:
+                    write_track_gain(destination, replaygain, replaygain_peak)
+                except ReplayGainError as error:
+                    gain_errors.append(
+                        f"{source.name}: ReplayGain: {error}"
+                    )
 
             stat = destination.stat()
             self.database.save_track(
@@ -555,7 +573,7 @@ class LibraryEditor:
             raise LibraryEditError(f"{source.name}: {error}") from None
 
         track_id = track["id"]
-        result = {"id": track_id, "errors": []}
+        result = {"id": track_id, "errors": list(gain_errors)}
 
         if image:
             try:

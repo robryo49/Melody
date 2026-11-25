@@ -6,13 +6,17 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 
 ### Library
 
+- **Playlist categories:** a playlist can be given a category when it is created or edited (the field suggests the existing ones). A playlist with no category stays in the Playlists page. One with a category is listed on a page of that name in a sub-menu under Playlists in the sidebar, which exists as long as a playlist has it. Works for automatic playlists too, so "Album contains Star Wars" in a "Movies" category gives a merged view of those albums.
 - **Back and forward:** the arrows next to the title of the sidebar go back and forth between the pages visited, like a browser's.
 - **Library page:** every track in one list, with search and sorting by title, album, artist or duration. A side panel shows the selected track's artwork and details.
 - **Albums, Artists and Playlists pages:** a grid of covers, with a page of its own for each album, artist and playlist.
+- **Search page:** searches the whole library at once and lists the artists, albums, tracks and compilations that contain the words typed. It ignores case and accents ("beyonce" finds "Beyoncé"), and names that start with the words come first.
+- **Favorites, Recent and Most played:** pages for the tracks marked with the heart in any list, and for the tracks played lately and the most.
+- **Automatic playlists:** a playlist can be made of rules instead of a list of tracks. A condition compares the title, artist, album, genre, year, play count, duration (in minutes), date added or favorite mark; all or any of the conditions must match; the playlist is sorted and can be cut to a number of tracks. Ready-made starting points: Most played, Never played, Recently added, and Favorite and often played. Its tracks are worked out from the library each time, so they join or leave by themselves.
 - **Compilations:** long audio files such as mixes and live sets can be kept apart from regular tracks. They get their own page, and the minimum length that makes a file a compilation is configurable.
 - **Singles:** a track with no album is treated as a single and filed in its artist's folder.
 - **Artwork:** covers are read from the files and from image files in the folders, and looked up online when nothing is found locally.
-- **Automatic scan:** the music folder is watched. Music you copy into it by hand, or delete or rename there, is picked up a few seconds after the changes stop, with no need to restart or press Rescan. Like any scan, it files new music under `Artist/Album` according to its tags. Melody's own changes (imports, edits, scans) do not set it off. It can be switched off in Preferences, under "Watch the music folder".
+- **Automatic scan:** the music folder is watched. Music you copy into it by hand, or delete or rename there, is picked up a few seconds after the changes stop, with no need to restart or press Rescan. Like any scan, it files new music under `Artist/Album` according to its tags (unless organizing is switched off in Preferences). Melody's own changes (imports, edits, scans) do not set it off. It can be switched off in Preferences, under "Watch the music folder".
 
 ### Editing
 
@@ -37,6 +41,8 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - Playback through GStreamer, with a player bar offering previous, play and pause, next, a seek bar, volume, shuffle and repeat (off, all, one).
 - Pressing play with nothing loaded plays the track selected in the Library.
 - The play queue follows the page you start playing from.
+- **Equalizer:** a window with an on and off switch, ten bands from 30 Hz to 15 kHz that can each be boosted or cut by up to 12 dB, and ten presets (Flat, Bass boost, Bass reduce, Treble boost, Vocal, Rock, Pop, Jazz, Classical and Electronic). The settings are kept between launches and heard at once.
+- **ReplayGain:** a switch in the equalizer window plays each track with its ReplayGain tag, so tracks recorded at different levels sound equally loud. The edit window shows the tag of a track (MP3, FLAC, Ogg Vorbis and M4A files can hold one) and lets you change it or measure the file's loudness to write one.
 - **Currently playing page:** under Search in the sidebar, it shows the track being played large, with its cover, title, artist and album (both open their pages), duration and play count, the previous, play or pause and next controls, and buttons to favorite, add to a playlist or edit it.
 - **Playing queue page:** under Search in the sidebar, it lists the track being played and everything after it. Double-click a track to play from there, right-click to play it, move it to right after the current track or remove it, and use Clear to empty everything after the current track.
 - Desktop integration through MPRIS: media keys, the shell's media widget and tools such as `playerctl` can show what is playing and control play, pause, next, previous, seek, shuffle, repeat and volume.
@@ -81,12 +87,14 @@ uv run melody
 
 The application can also be started directly with `python src/main.py`, from an environment that has the requirements above.
 
-By default the library lives in `~/Musique`. Files found there are read when Melody starts, and **Rescan library** in the preferences checks everything again and moves any file that is not where its tags say it belongs.
+By default the library lives in your system's Music folder (`~/Musique` on a French system, `~/Music` on an English one; an existing `~/Musique` that holds music is kept). Files found there are read when Melody starts, and **Rescan library** in the preferences checks everything again and, unless organizing is switched off, moves any file that is not where its tags say it belongs.
 
 ## Preferences
 
-- **Rescan library:** re-reads every file and reorganizes the folders.
-- **Organization:** sorts files into artist and album folders.
+- **Music folder:** shows where the music is kept, and **Change** picks another folder. Melody asks first, then scans the new folder and makes it the library. Tracks whose files are at the same place in the new folder (because you moved or copied your music there as it is) keep their play counts, favorites and playlists. Tracks that are not in the new folder leave the library; their files are not touched. Playback stops, since what was playing came from the old folder. The home folder and the root of the disk are refused.
+- **Rescan library:** re-reads every file and, if organizing is on, reorganizes the folders.
+- **Watch the music folder:** scan again by itself when files change in the folder.
+- **Organize music by artist and album:** when on (the default), a scan moves files into `Artist/Album` folders according to their tags. When off, a scan leaves every file where it is. Music you import or edit in Melody is always filed that way.
 - **Compilations:** turns the Compilations page on or off, sets the minimum length of a compilation, and chooses whether compilations also appear in their albums.
 
 Every change is applied and saved immediately.
@@ -103,7 +111,7 @@ src/
     database/             SQLite storage for tracks and playlists
     import_sources/       where music can be imported from (files, YouTube)
     services/             library scanning, editing, metadata, artwork, playback, MPRIS, keyboard shortcuts
-    views/                Library, Albums, Artists, Playlists and Preferences pages
+    views/                Library, Albums, Artists, Playlists, Search, Currently playing, Playing queue and Preferences pages
     widgets/              player bar, edit and import windows, shared controls (including file drops)
 ```
 
@@ -121,13 +129,12 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 
 ## TODO
 
-- [x] Multi-track select
-- [x] "Currently playing" menu
-- [x] "Playing queue" menu
-- [x] Equalizer
-- [x] Per-track Equalizer
-- [x] ReplayGain
-- [x] Keyboard shortcuts
-- [x] Auto-scan
-- [x] Drag and drop to import
-- [x] Duplicate check on import
+- [ ] Resume on start (the queue, the current track and its position)
+- [ ] Sleep timer
+- [ ] Gapless playback and crossfade
+- [ ] Genres and year (pages, and filters)
+- [ ] Ratings
+- [ ] Background playback (keep playing when the window is closed)
+- [ ] Bulk artwork editing
+- [ ] Multi-select in the Playing queue page
+- [ ] Listening stats

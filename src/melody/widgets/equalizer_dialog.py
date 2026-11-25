@@ -1,8 +1,10 @@
 """The equalizer window: an on/off switch, a list of presets and one slider per
 band, and below them the ReplayGain switch.
 
-It does not block the main window, so the music can be paused or skipped
-while the sliders are moved, and every change is heard at once.
+It is modal, like the other windows: the main window is locked (and dimmed by
+the desktop) while it is open, and the window stays attached to it. Every
+change to the sliders is heard at once, and the media keys still pause or skip
+the music.
 """
 
 import gi
@@ -34,10 +36,12 @@ def _format_gain(gain):
 
 
 class _EqualizerWindow(Adw.Window):
-    def __init__(self, parent, equalizer, available=True):
+    def __init__(self, parent, equalizer, available=True, analyse=None):
         super().__init__()
 
         self.equalizer = equalizer
+        # ``analyse(window)`` opens the ReplayGain analysis (None: no button).
+        self._analyse = analyse
         # False when the player has no equalizer (its GStreamer plugin is
         # missing): the sliders are then replaced by a note.
         self.available = available
@@ -47,7 +51,13 @@ class _EqualizerWindow(Adw.Window):
 
         self.set_title("Equalizer")
         self.set_transient_for(parent)
+        # Like the other windows, it locks the main window while it is open
+        # (and the desktop keeps it attached to it, centered over it).
+        self.set_modal(True)
         self.set_destroy_with_parent(True)
+        # Fixed size: the width given here, the height the content needs.
+        self.set_resizable(False)
+        self.set_size_request(640, -1)
         self.set_default_size(640, -1)
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -120,6 +130,19 @@ class _EqualizerWindow(Adw.Window):
 
         row.append(self.replaygain_switch)
         row.append(labels)
+
+        if self._analyse is not None:
+            analyse_button = Gtk.Button(label="Analyse…")
+            analyse_button.set_valign(Gtk.Align.CENTER)
+            analyse_button.set_tooltip_text(
+                "Measure how loud tracks are and set their ReplayGain"
+            )
+            analyse_button.connect(
+                "clicked",
+                lambda _button: self._analyse(self),
+            )
+            row.append(analyse_button)
+
         return row
 
     def _build_top_row(self):
@@ -301,12 +324,15 @@ class _EqualizerWindow(Adw.Window):
         return False
 
 
-def show_equalizer_dialog(parent, equalizer, available=True):
+def show_equalizer_dialog(parent, equalizer, available=True, analyse=None):
     """Open the equalizer window (or bring it back if it is open).
 
     ``available`` is False when the player has no equalizer (GStreamer's
     plugin is missing): the window then says so instead of showing sliders,
     and still has the ReplayGain switch.
+
+    ``analyse(window)``, if given, is what the "Analyse…" button next to the
+    ReplayGain switch calls, with this window as its parent.
     """
     global _open_window
 
@@ -314,5 +340,5 @@ def show_equalizer_dialog(parent, equalizer, available=True):
         _open_window.present()
         return
 
-    _open_window = _EqualizerWindow(parent, equalizer, available)
+    _open_window = _EqualizerWindow(parent, equalizer, available, analyse)
     _open_window.present()

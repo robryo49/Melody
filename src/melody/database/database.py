@@ -101,6 +101,14 @@ class Database:
                 # as JSON (see services/automatic_playlists.py).
                 connection.execute("ALTER TABLE playlists ADD COLUMN rules TEXT")
 
+            if "category" not in playlist_columns:
+                # NULL for a playlist that stays in the Playlists page.
+                # Otherwise the name of the category it is filed under (see
+                # services/playlist_categories.py).
+                connection.execute(
+                    "ALTER TABLE playlists ADD COLUMN category TEXT"
+                )
+
             connection.execute("""
                                CREATE TABLE IF NOT EXISTS playlist_tracks (
                                                                               playlist_id TEXT NOT NULL,
@@ -210,6 +218,56 @@ class Database:
                                """, (*values, row["id"]))
 
             return "updated"
+
+    def rebase_paths(self, old_root, new_root) -> int:
+        """Point the tracks stored under ``old_root`` at the same place under
+        ``new_root``, for those whose file is there.
+
+        Used when the music folder is changed: if the music was moved or
+        copied to the new folder as it is, its tracks stay the same tracks
+        (with their play count, favorite mark, start and end times and place
+        in playlists) instead of being forgotten and found again as new ones.
+        A track whose file is not in the new folder is left alone, and is
+        removed by the next scan.
+
+        Returns how many tracks were pointed at the new folder.
+        """
+        old_root = Path(old_root).expanduser().resolve()
+        new_root = Path(new_root).expanduser().resolve()
+
+        if old_root == new_root:
+            return 0
+
+        moved = 0
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, path FROM tracks"
+            ).fetchall()
+
+            for row in rows:
+                try:
+                    relative = Path(row["path"]).relative_to(old_root)
+                except ValueError:
+                    continue
+
+                candidate = new_root / relative
+
+                if not candidate.is_file():
+                    continue
+
+                try:
+                    connection.execute(
+                        "UPDATE tracks SET path = ? WHERE id = ?",
+                        (str(candidate), row["id"]),
+                    )
+                except sqlite3.IntegrityError:
+                    # The new place is already a track of its own.
+                    continue
+
+                moved += 1
+
+        return moved
 
     def remove_missing(self, existing_paths: set[Path]) -> int:
         existing = {
@@ -374,7 +432,34 @@ class Database:
 
     # Playlists
 
-    def create_playlist(self, name: str) -> str:
+    @staticmethod
+    def _resolve_category(connection, category):
+        """The category to store for ``category`` (None for no category).
+
+        When a playlist already has that category, in whatever case, its
+        spelling is the one used, so "movies" joins "Movies" instead of making
+        a second category.
+        """
+        from melody.services.playlist_categories import (
+            category_key,
+            clean_category,
+        )
+
+        cleaned = clean_category(category)
+
+        if cleaned is None:
+            return None
+
+        for row in connection.execute(
+                "SELECT DISTINCT category FROM playlists "
+                "WHERE category IS NOT NULL"
+        ):
+            if category_key(row["category"]) == category_key(cleaned):
+                return row["category"]
+
+        return cleaned
+
+    def create_playlist(self, name: str, category: str | None = None) -> str:
         name = name.strip()
         if not name:
             raise ValueError("A playlist name cannot be empty")
@@ -382,12 +467,39 @@ class Database:
         playlist_id = str(uuid.uuid4())
 
         with self._connect() as connection:
+            category = self._resolve_category(connection, category)
             connection.execute(
-                "INSERT INTO playlists (id, name) VALUES (?, ?)",
-                (playlist_id, name),
+                "INSERT INTO playlists (id, name, category) VALUES (?, ?, ?)",
+                (playlist_id, name, category),
             )
 
         return playlist_id
+
+    def set_playlist_category(self, playlist_id: str, category: str | None):
+        """File a playlist under ``category``, or take it out of its category
+        (``None`` or empty text): it is then back in the Playlists page."""
+        with self._connect() as connection:
+            category = self._resolve_category(connection, category)
+            cursor = connection.execute("""
+                                        UPDATE playlists
+                                        SET category = ?, modified_at = CURRENT_TIMESTAMP
+                                        WHERE id = ?
+                                        """, (category, playlist_id))
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"Playlist does not exist: {playlist_id}")
+
+    def get_playlist_categories(self) -> list[str]:
+        """The categories in use, A-Z."""
+        from melody.services.playlist_categories import category_names
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT category FROM playlists "
+                "WHERE category IS NOT NULL"
+            ).fetchall()
+
+        return category_names([dict(row) for row in rows])
 
     def rename_playlist(self, playlist_id: str, name: str):
         name = name.strip()
@@ -422,7 +534,12 @@ class Database:
         exists once a picture has been chosen)."""
         return self.path.parent / "playlist-covers" / f"{playlist_id}.png"
 
-    def create_automatic_playlist(self, name: str, rules: dict) -> str:
+    def create_automatic_playlist(
+            self,
+            name: str,
+            rules: dict,
+            category: str | None = None,
+    ) -> str:
         """Create an automatic playlist: it has no tracks of its own, and lists
         the library's tracks that ``rules`` select (see
         services/automatic_playlists.py).
@@ -439,9 +556,11 @@ class Database:
         playlist_id = str(uuid.uuid4())
 
         with self._connect() as connection:
+            category = self._resolve_category(connection, category)
             connection.execute(
-                "INSERT INTO playlists (id, name, rules) VALUES (?, ?, ?)",
-                (playlist_id, name, rules_text),
+                "INSERT INTO playlists (id, name, rules, category) "
+                "VALUES (?, ?, ?, ?)",
+                (playlist_id, name, rules_text, category),
             )
 
         return playlist_id

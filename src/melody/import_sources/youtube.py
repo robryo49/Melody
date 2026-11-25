@@ -32,6 +32,8 @@ from melody.import_sources.base import (
     SearchSource,
 )
 from melody.services.library_scanner import SUPPORTED_EXTENSIONS
+from melody.services.import_formats import BITRATE, import_format
+from melody.services.settings import get_settings
 
 
 YOUTUBE_HOSTS = {
@@ -197,12 +199,12 @@ def download_audio(
         elif status.get("status") == "finished":
             report(1.0, "Finishing…")
 
-    # The audio is converted to Opus with ffmpeg when it is installed: it is
-    # what GStreamer decodes with its base plugins, and YouTube's best audio
-    # is Opus already, so it is usually just repackaged, not re-encoded.
-    # Without ffmpeg, YouTube's own AAC (m4a) stream is kept as it is, which
-    # needs GStreamer's AAC decoder.
+    # With ffmpeg, the audio is converted to the format chosen in the
+    # preferences (MP3 unless changed; see ``import_formats``). Without it,
+    # YouTube's own AAC (m4a) stream is kept as it is, whatever was chosen,
+    # which needs GStreamer's AAC decoder.
     has_ffmpeg = shutil.which("ffmpeg") is not None
+    chosen_format = import_format(get_settings().import_format)
 
     options = {
         "format": (
@@ -221,9 +223,16 @@ def download_audio(
     }
 
     if has_ffmpeg:
-        options["postprocessors"] = [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "opus"}
-        ]
+        postprocessor = {
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": chosen_format["codec"],
+        }
+
+        # Opus is YouTube's own audio, just repackaged: nothing to encode.
+        if chosen_format["key"] != "opus":
+            postprocessor["preferredquality"] = BITRATE
+
+        options["postprocessors"] = [postprocessor]
 
     folder = Path(tempfile.mkdtemp(prefix="melody-youtube-"))
     options["paths"] = {"home": str(folder)}

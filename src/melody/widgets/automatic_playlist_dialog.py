@@ -21,7 +21,11 @@ from melody.services.automatic_playlists import (
     evaluate_rules,
     normalize_rules,
 )
-from melody.services.collection_actions import _close_on_escape
+from melody.services.collection_actions import (
+    SuggestionField,
+    _close_on_escape,
+)
+from melody.services.playlist_categories import category_suggestions
 
 _FIELD_KEYS = list(FIELDS)
 _SORT_KEY_LIST = list(SORT_KEYS)
@@ -160,13 +164,22 @@ def _caption(text):
     return label
 
 
-def show_automatic_playlist_dialog(parent, playlist, library_tracks, on_save):
+def show_automatic_playlist_dialog(
+        parent,
+        playlist,
+        library_tracks,
+        on_save,
+        categories=(),
+        default_category=None,
+):
     """Open the window for an automatic playlist.
 
     ``playlist`` is the playlist to change, or None to make a new one.
     ``library_tracks`` are what the live count is worked out from.
-    ``on_save(name, rules)`` is called with the checked name and rules when
-    the person saves.
+    ``categories`` are the names of the playlist categories in use, offered
+    as suggestions; a new playlist starts in ``default_category``.
+    ``on_save(name, rules, category)`` is called with the checked name and
+    rules, and the category (None for none), when the person saves.
     """
     editing = playlist is not None
     rules = playlist["rules"] if editing else default_rules()
@@ -206,6 +219,21 @@ def show_automatic_playlist_dialog(parent, playlist, library_tracks, on_save):
     name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     name_box.append(_caption("Name"))
     name_box.append(name_entry)
+
+    # Category: the page of the sidebar the playlist is listed on. Left
+    # empty, it stays in the Playlists page.
+    category_field = SuggestionField(
+        "Category",
+        noun="category",
+        suggestions=category_suggestions(categories),
+        initial=(
+            (playlist.get("category") if editing else default_category) or ""
+        ),
+        new_message=(
+            "New category — it will be added under Playlists in the sidebar"
+        ),
+    )
+    category_field.entry.set_placeholder_text("None")
 
     # Conditions.
     match_dropdown = Gtk.DropDown.new_from_strings(["all", "any"])
@@ -281,6 +309,7 @@ def show_automatic_playlist_dialog(parent, playlist, library_tracks, on_save):
     error_label.set_visible(False)
 
     content.append(name_box)
+    content.append(category_field)
     content.append(conditions_section)
     content.append(order_section)
     content.append(preview_label)
@@ -392,7 +421,7 @@ def show_automatic_playlist_dialog(parent, playlist, library_tracks, on_save):
             return
 
         window.close()
-        on_save(name, checked)
+        on_save(name, checked, category_field.get_text() or None)
 
     def on_close(_window):
         if preview_source[0]:

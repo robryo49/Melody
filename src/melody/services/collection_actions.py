@@ -17,6 +17,7 @@ from melody.services.compilations import (
     format_clock,
     is_compilation,
 )
+from melody.services.playlist_categories import category_suggestions
 from melody.services.settings import get_settings
 from melody.services.replaygain import read_track_gain, supports_replaygain
 from melody.services.singles import has_album
@@ -478,9 +479,13 @@ class SuggestionField(Gtk.Box):
             suggestions=(),
             initial="",
             priority=None,
+            new_message=None,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
 
+        # What the status line says about a value that does not exist yet
+        # (the default speaks of the library).
+        self._new_message = new_message
         self._noun = noun
         self._suggestions = list(suggestions)
         self._known = {item["value"].casefold() for item in self._suggestions}
@@ -491,6 +496,7 @@ class SuggestionField(Gtk.Box):
         self._applying = False
         self._changed_callbacks = []
         self._activate_callbacks = []
+        self._picked_callbacks = []
 
         caption = Gtk.Label(label=label, xalign=0)
         caption.add_css_class("caption-heading")
@@ -561,6 +567,12 @@ class SuggestionField(Gtk.Box):
     def connect_activate(self, callback):
         self._activate_callbacks.append(callback)
 
+    def connect_picked(self, callback):
+        """``callback(suggestion)`` is called when a value is picked from the
+        list (a click, or Enter on the highlighted one), just before the field
+        takes it. ``suggestion`` is the dict the list was made from."""
+        self._picked_callbacks.append(callback)
+
     def grab_focus(self, show_suggestions=True):
         # ``show_suggestions=False`` focuses the field without opening the
         # list (used for the dialog's initial focus).
@@ -606,6 +618,7 @@ class SuggestionField(Gtk.Box):
 
         row.set_child(box)
         row.value = suggestion["value"]
+        row.suggestion = suggestion
         return row
 
     def _refresh(self):
@@ -686,7 +699,8 @@ class SuggestionField(Gtk.Box):
             self.status.add_css_class("dim-label")
         else:
             self.status.set_text(
-                f"New {self._noun} — it will be added to your library"
+                self._new_message
+                or f"New {self._noun} — it will be added to your library"
             )
             self.status.remove_css_class("dim-label")
             self.status.add_css_class("accent")
@@ -698,6 +712,13 @@ class SuggestionField(Gtk.Box):
         self._applying = False
         self._dismissed = True
         self._refresh()
+
+    def _pick(self, row):
+        # Told first, so the listeners still see the field as it was.
+        for callback in self._picked_callbacks:
+            callback(row.suggestion)
+
+        self._apply(row.value)
 
     def _move_selection(self, step):
         rows = self._rows()
@@ -746,13 +767,13 @@ class SuggestionField(Gtk.Box):
             if self.popover.get_visible() else None
         )
         if row is not None:
-            self._apply(row.value)
+            self._pick(row)
             return
         for callback in self._activate_callbacks:
             callback()
 
     def _on_row_activated(self, _listbox, row):
-        self._apply(row.value)
+        self._pick(row)
         self.entry.grab_focus_without_selecting()
 
     def _on_key_pressed(self, _controller, keyval, _keycode, _state):
@@ -821,6 +842,11 @@ def show_edit_dialog(
          "priority_field": "artist",  # optional: rank by another field
          "optional": True,           # optional: may be left empty
          "placeholder": "...",        # optional: shown while empty
+         "new_message": "...",        # optional: what the status line says
+                                      # of a value that does not exist yet
+         "on_pick": pick,             # optional: pick(suggestion, fields) is
+                                      # called when a suggestion is picked
+                                      # (``fields``: key -> field)
          "tooltip": "...",            # optional
          "validate": check}           # optional: check(text) -> bool; the
                                       # field is outlined, and Save waits,
@@ -856,8 +882,8 @@ def show_edit_dialog(
     With ``round_cover`` the cover is shown as a circle (an artist's
     picture).
 
-    ``info`` is a list of ``(caption, value)`` pairs shown under the fields,
-    for information that cannot be edited (the play count, say).
+    ``info`` is a list of ``(caption, value)`` pairs shown under the cover,
+    each on one line ("Play count: 3"), for information that cannot be edited.
 
     Normally Save stays disabled until something has changed. With
     ``allow_unchanged`` it is enabled as soon as the fields are valid (for a
@@ -904,16 +930,14 @@ def show_edit_dialog(
     cover_size = 220
     GAP = 24
     FORM_WIDTH = 380
-    # Room for the fields, the "Compilation" checkbox that sits under them,
-    # and the hint. The suggestion dropdown floats over the form, so it needs
-    # no room of its own.
+    # Room for the fields and the hint. The suggestion dropdown floats over
+    # the form, so it needs no room of its own. (What goes under the cover,
+    # on the left, makes that column taller instead.)
     FORM_HEIGHT = max(
         cover_size,
         len(specs) * 86 - 16
-        + (44 if compilation_spec else 0)
         + (60 if replaygain_spec else 0)
-        + (60 if hint else 0)
-        + 44 * len(info or ()),
+        + (60 if hint else 0),
     )
 
     cover = Gtk.Picture()
@@ -1025,9 +1049,18 @@ def show_edit_dialog(
         )
         cover_overlay.add_controller(cover_motion)
 
-    # The "Apply artwork" toggle goes right under the cover. Only switched on
-    # does it do anything, and only when the window is saved, like the rest.
-    cover_column = cover_overlay
+    # The left column: the cover, then, when there are any, the "Apply
+    # artwork" toggle, the read-only information (the play count) and the
+    # "Compilation" checkbox, in that order. It is as wide as the artwork,
+    # and what is in it fills that width. Only switched on does "Apply
+    # artwork" do anything, and only when the window is saved, like the rest.
+    cover_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    cover_column.set_halign(Gtk.Align.START)
+    # As tall as the form beside it: what is under the cover (play count,
+    # "Compilation") shares the room left under it evenly.
+    cover_column.set_valign(Gtk.Align.FILL)
+    cover_column.append(cover_overlay)
+
     apply_button = None
     if apply_artwork:
         apply_button = Gtk.ToggleButton(label="Apply artwork")
@@ -1035,12 +1068,6 @@ def show_edit_dialog(
             "When saving, also write this artwork into every track of "
             "the album"
         )
-
-        # The column is as wide as the artwork, and the button fills it.
-        cover_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        cover_column.set_halign(Gtk.Align.START)
-        cover_column.set_valign(Gtk.Align.START)
-        cover_column.append(cover_overlay)
         cover_column.append(apply_button)
 
     # -- fields (right) --------------------------------------------------
@@ -1058,6 +1085,7 @@ def show_edit_dialog(
             suggestions=spec.get("suggestions", ()),
             initial=original[spec["key"]],
             priority=priority,
+            new_message=spec.get("new_message"),
         )
 
         if spec.get("placeholder"):
@@ -1065,6 +1093,13 @@ def show_edit_dialog(
 
         if spec.get("tooltip"):
             fields[spec["key"]].entry.set_tooltip_text(spec["tooltip"])
+
+        if spec.get("on_pick"):
+            fields[spec["key"]].connect_picked(
+                lambda suggestion, pick=spec["on_pick"]: pick(
+                    suggestion, fields,
+                )
+            )
 
     form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
     form.set_vexpand(True)
@@ -1084,19 +1119,23 @@ def show_edit_dialog(
     right.set_vexpand(False)
     right.append(form)
 
-    # Read-only information, laid out like a field but not editable.
+    # Read-only information, under the cover, on one line ("Play count: 3");
+    # a long one wraps within the column.
     for caption_text, value_text in info or ():
-        info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-
-        caption = Gtk.Label(label=caption_text, xalign=0)
-        caption.add_css_class("caption-heading")
-
-        value = Gtk.Label(label=value_text, xalign=0)
-        value.add_css_class("dim-label")
-
-        info_box.append(caption)
-        info_box.append(value)
-        right.append(info_box)
+        line = Gtk.Label(wrap=True, xalign=0)
+        line.set_use_markup(True)
+        line.set_markup(
+            f"<b>{GLib.markup_escape_text(caption_text)}:</b> "
+            f"{GLib.markup_escape_text(value_text)}"
+        )
+        # Wrap to the column, never widen it.
+        line.set_max_width_chars(1)
+        line.add_css_class("dim-label")
+        # Each line takes an equal share of the room under the cover, and sits
+        # in the middle of it.
+        line.set_vexpand(True)
+        line.set_valign(Gtk.Align.CENTER)
+        cover_column.append(line)
 
     if hint:
         right.append(hint_label)
@@ -1159,8 +1198,10 @@ def show_edit_dialog(
         compilation_check.set_active(compilation_initial)
         compilation_check.set_halign(Gtk.Align.START)
         compilation_check.set_tooltip_text(compilation_spec.get("tooltip"))
-        # Right under the fields, with the track's other info.
-        form.append(compilation_check)
+        # Under the cover, below the play count, sharing the room evenly.
+        compilation_check.set_vexpand(True)
+        compilation_check.set_valign(Gtk.Align.CENTER)
+        cover_column.append(compilation_check)
 
     def compilation_changed():
         return (
@@ -1341,6 +1382,35 @@ def show_edit_track_dialog(
     library_tracks = list(library_tracks)
     track_path = track.get("path")
 
+    # The album the field shows and that album's artist, to tell when the
+    # track's artist is the artist of its album (see ``on_album_picked``).
+    shown_album = {
+        "title": str(track.get("album") or "").strip(),
+        "artist": str(
+            track.get("album_artist") or track.get("artist") or ""
+        ).strip(),
+    }
+
+    def on_album_picked(suggestion, fields):
+        """Picking another album in the list also gives the track that
+        album's artist, when the track's artist was the artist of the album
+        shown until now (so it follows its album, and a track on a
+        compilation keeps its own artist)."""
+        new_artist = str(suggestion.get("detail") or "").strip()
+        follows = (
+            shown_album["title"]
+            and fields["album"].get_text().casefold()
+            == shown_album["title"].casefold()
+            and fields["artist"].get_text().casefold()
+            == shown_album["artist"].casefold()
+        )
+
+        if follows and new_artist:
+            fields["artist"].entry.set_text(new_artist)
+
+        shown_album["title"] = str(suggestion["value"]).strip()
+        shown_album["artist"] = new_artist
+
     def load_cover():
         # The track's own image only (embedded in its file). A track without
         # one shows no artwork here, never its album's.
@@ -1369,6 +1439,7 @@ def show_edit_track_dialog(
             "priority_field": "artist",
             # Left empty, the track is a single.
             "optional": True,
+            "on_pick": on_album_picked,
         },
     ]
 
@@ -1378,7 +1449,15 @@ def show_edit_track_dialog(
 
     if replaygain and track_path:
         if supports_replaygain(track_path):
-            replaygain_spec = {"initial": read_track_gain(track_path)}
+            # A track about to be imported may carry a gain measured just now;
+            # otherwise it is the one the file is tagged with, if any.
+            measured = track.get("replaygain")
+            replaygain_spec = {
+                "initial": (
+                    measured if measured is not None
+                    else read_track_gain(track_path)
+                ),
+            }
         else:
             replaygain_unsupported = True
 
@@ -1529,11 +1608,14 @@ def show_edit_playlist_dialog(
         playlist,
         cover_path,
         callback,
+        categories=(),
 ):
-    """Edit a playlist's name and picture.
+    """Edit a playlist's name, category and picture.
 
-    ``callback`` receives ``{"name": ...}``, plus ``"image"`` (raw bytes) when
-    a new picture was chosen.
+    ``categories`` are the names of the categories in use, offered as
+    suggestions. ``callback`` receives ``{"name": ..., "category": ...}`` (the
+    category is empty for none), plus ``"image"`` (raw bytes) when a new
+    picture was chosen.
     """
     specs = [
         {
@@ -1541,6 +1623,7 @@ def show_edit_playlist_dialog(
             "label": "Name",
             "initial": playlist["name"],
         },
+        _category_spec(playlist.get("category"), categories),
     ]
 
     show_edit_dialog(
@@ -1550,7 +1633,58 @@ def show_edit_playlist_dialog(
         callback,
         cover_path=cover_path,
         placeholder_icon="view-list-symbolic",
+        hint=_CATEGORY_HINT,
         image_search=lambda values: playlist_search(),
+    )
+
+
+_CATEGORY_HINT = (
+    "A playlist with a category is listed under Playlists in the sidebar, "
+    "on a page of that name. Left empty, it stays in the Playlists page."
+)
+
+
+def _category_spec(initial, categories):
+    """The field that gives a playlist its category (see
+    ``show_edit_dialog``), listing the ``categories`` that exist."""
+    return {
+        "key": "category",
+        "label": "Category",
+        "initial": initial or "",
+        "noun": "category",
+        "suggestions": category_suggestions(categories),
+        # Left empty, the playlist stays in the Playlists page.
+        "optional": True,
+        "placeholder": "None",
+        "new_message": (
+            "New category — it will be added under Playlists in the sidebar"
+        ),
+    }
+
+
+def show_new_playlist_dialog(parent, categories, default_category, callback):
+    """Ask for the name, and the category if any, of a new playlist.
+
+    ``categories`` are the names of the categories in use, and the category
+    field starts with ``default_category`` (the page the playlist is made
+    from). ``callback`` receives ``{"name": ..., "category": ...}``, the
+    category being empty for none.
+    """
+    specs = [
+        {
+            "key": "name",
+            "label": "Name",
+            "initial": "",
+        },
+        _category_spec(default_category, categories),
+    ]
+
+    _show_tracks_dialog(
+        parent,
+        "New playlist",
+        _CATEGORY_HINT,
+        specs,
+        callback,
     )
 
 
@@ -1560,9 +1694,10 @@ def _show_tracks_dialog(parent, window_title, description, specs, callback):
 
     ``specs`` describes the fields as for ``show_edit_dialog`` (``key``,
     ``label``, ``initial``, ``noun``, ``suggestions``, ``priority_field``),
-    plus an optional ``placeholder``, shown while a field is empty. Every
-    field has to be filled in, and Save waits until one of them differs from
-    where it started. ``callback`` receives ``{key: text}``.
+    plus an optional ``placeholder``, shown while a field is empty, and
+    ``new_message`` (see ``show_edit_dialog``). Every field has to be filled
+    in, except those marked ``optional``, and Save waits until one of them
+    differs from where it started. ``callback`` receives ``{key: text}``.
     """
     window = Adw.Window()
     window.set_transient_for(parent)
@@ -1601,6 +1736,7 @@ def _show_tracks_dialog(parent, window_title, description, specs, callback):
             suggestions=spec.get("suggestions", ()),
             initial=original[spec["key"]],
             priority=priority,
+            new_message=spec.get("new_message"),
         )
 
         if spec.get("placeholder"):
@@ -1629,9 +1765,14 @@ def _show_tracks_dialog(parent, window_title, description, specs, callback):
     def current_values():
         return {key: field.get_text() for key, field in fields.items()}
 
+    required = [spec["key"] for spec in specs if not spec.get("optional")]
+
     def can_save():
         values = current_values()
-        return all(values.values()) and values != original
+        return (
+            all(values[key] for key in required)
+            and values != original
+        )
 
     def on_changed(*_args):
         save_button.set_sensitive(can_save())

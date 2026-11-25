@@ -95,6 +95,19 @@ class LibraryWatcher:
 
         self._monitors.clear()
 
+    def set_folder(self, folder):
+        """Watch ``folder`` instead (the music folder was changed)."""
+        self.folder = Path(folder)
+        self._cancel_timer()
+
+        for monitor in self._monitors.values():
+            monitor.cancel()
+
+        self._monitors.clear()
+
+        if self._started:
+            self._sync_monitors()
+
     def pause(self):
         """Melody is working on the folder (a scan): report nothing, and drop
         what was waiting, since the scan sees it all anyway."""
