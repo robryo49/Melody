@@ -10,9 +10,11 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Back and forward:** the arrows next to the title of the sidebar go back and forth between the pages visited, like a browser's.
 - **Library page:** every track in one list, with search and sorting by title, album, artist or duration. A side panel shows the selected track's artwork and details.
 - **Albums, Artists and Playlists pages:** a grid of covers, with a page of its own for each album, artist and playlist.
+- **Album groups:** an optional page under Albums (switched on in Preferences, under Albums). It lists every album like the Albums page, but albums that share a title are grouped into one, so the same name appears once. Opening a group shows the tracks of all its albums, and its header lists the artists, each one a link to its page. Editing a group changes its title (every album in it takes the new one) and its artwork; the artists are left alone.
+- **Ratings:** each track has five stars, which can be empty, half full or full. Hovering over the stars fills them up to the mouse, half a star at a time, and a click sets the rating (clicking the same rating again clears it). The stars show under the play count in the side panel, where clicking them rates the selected track, and under the artwork in the edit window.
 - **Search page:** searches the whole library at once and lists the artists, albums, tracks and compilations that contain the words typed. It ignores case and accents ("beyonce" finds "Beyoncé"), and names that start with the words come first.
 - **Favorites, Recent and Most played:** pages for the tracks marked with the heart in any list, and for the tracks played lately and the most.
-- **Automatic playlists:** a playlist can be made of rules instead of a list of tracks. A condition compares the title, artist, album, genre, year, play count, duration (in minutes), date added or favorite mark; all or any of the conditions must match; the playlist is sorted and can be cut to a number of tracks. Ready-made starting points: Most played, Never played, Recently added, and Favorite and often played. Its tracks are worked out from the library each time, so they join or leave by themselves.
+- **Automatic playlists:** a playlist can be made of rules instead of a list of tracks. A condition compares the title, artist, album, genre, year, play count, rating (in whole stars), duration (in minutes), date added or favorite mark; all or any of the conditions must match; the playlist is sorted and can be cut to a number of tracks. Ready-made starting points: Most played, Never played, Recently added, and Favorite and often played. Its tracks are worked out from the library each time, so they join or leave by themselves.
 - **Compilations:** long audio files such as mixes and live sets can be kept apart from regular tracks. They get their own page, and the minimum length that makes a file a compilation is configurable.
 - **Singles:** a track with no album is treated as a single and filed in its artist's folder.
 - **Artwork:** covers are read from the files and from image files in the folders, and looked up online when nothing is found locally.
@@ -135,8 +137,7 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 - [x] Resume on start (the queue, the current track and its position)
 - [x] Gapless playback and crossfade
 - [x] Genres and year (pages, and filters)
-- [ ] Ratings
+- [x] Ratings
 - [ ] Background playback (keep playing when the window is closed)
 - [x] Bulk artwork editing
 - [x] Multi-select in the Playing queue page
-- [ ] Listening stats

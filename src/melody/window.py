@@ -11,6 +11,7 @@ from gi.repository import Adw, Gtk, GLib
 from melody.services import LibraryManager, LibraryEditor, CollectionMergeRequired
 from melody.services.collection_actions import (
     show_edit_album_dialog,
+    show_edit_album_group_dialog,
     show_edit_artist_dialog,
     show_edit_playlist_dialog,
     show_edit_track_dialog,
@@ -114,6 +115,7 @@ from melody.widgets.track_table import (
     set_favorite_handler,
     set_playing_track,
 )
+from melody.widgets.star_rating import set_rating_handler
 
 
 class MelodyWindow(Adw.ApplicationWindow):
@@ -241,14 +243,17 @@ class MelodyWindow(Adw.ApplicationWindow):
                 ),
             ),
             "Albums": AlbumsView(),
+            # The same page, with the albums that share a title grouped (see
+            # the setting ``album_groups_enabled``).
+            "Album groups": AlbumsView(grouped=True),
             "Artists": ArtistsView(),
             "Playlists": PlaylistsView(),
         }
 
-        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Album groups", "Artists", "Search"):
             self.views[name].set_playback_manager(self.playback_manager)
 
-        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Album groups", "Artists", "Search"):
             self.views[name].set_context_actions(
                 self._edit_track,
                 self._choose_playlist_for_track,
@@ -261,15 +266,16 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Library"].set_import_callback(self._import_music)
         # The pages of an album, an artist and a playlist can too, and what
         # they import starts out belonging to them.
-        for name in ("Albums", "Artists", "Playlists"):
+        for name in ("Albums", "Album groups", "Artists", "Playlists"):
             self.views[name].set_import_callback(self._import_music)
         # Audio files can be dropped on those same pages, and only on those:
         # they are the ones with an Import button.
-        for name in ("Library", "Albums", "Artists", "Playlists"):
+        for name in ("Library", "Albums", "Album groups", "Artists", "Playlists"):
             self.views[name].set_drop_callback(self._import_dropped_files)
         set_track_deletion(self._delete_track)
         # The heart next to a track in every list.
         set_favorite_handler(self._toggle_favorite)
+        set_rating_handler(self._set_rating)
         set_track_queue_actions(
             self.playback_manager.play_after_current,
             self.playback_manager.add_to_queue,
@@ -311,6 +317,12 @@ class MelodyWindow(Adw.ApplicationWindow):
             self._edit_album,
         )
         self.views["Albums"].set_image_callbacks(self._change_album_image)
+        # The album groups: the same callbacks, which tell a group from an album.
+        self.views["Album groups"].set_rename_callbacks(
+            self._edit_album,
+            self._edit_album,
+        )
+        self.views["Album groups"].set_image_callbacks(self._change_album_image)
         self.views["Artists"].set_image_callbacks(
             self._change_artist_image,
             self._change_album_image,
@@ -452,6 +464,8 @@ class MelodyWindow(Adw.ApplicationWindow):
             ("Recent", "document-open-recent-symbolic"),
             ("Most played", "audio-headphones-symbolic"),
             ("Albums", "media-optical-symbolic"),
+            # Only shown while album groups are enabled.
+            ("Album groups", "view-grid-symbolic"),
             ("Artists", "system-users-symbolic"),
             ("Playlists", "view-list-symbolic"),
         ]:
@@ -666,6 +680,17 @@ class MelodyWindow(Adw.ApplicationWindow):
     def _set_most_played_count(self, count):
         """A new number in the Most played page's header (see above)."""
         self.settings.most_played_count = count
+
+    def _set_rating(self, track, rating):
+        """Give ``track`` a rating (in half stars), from its detail panel or its
+        edit window. Every list is brought up to date."""
+        try:
+            self.database.set_rating(track["id"], rating)
+        except Exception as error:
+            show_error_dialog(self, "Could not change the rating", error)
+            return
+
+        self._reload_library_from_database()
 
     def _toggle_favorite(self, track):
         """A click on a track's heart: mark it as a favorite, or take the mark
@@ -1004,6 +1029,13 @@ class MelodyWindow(Adw.ApplicationWindow):
         enabled = self.settings.compilations_enabled
         self.navigation_rows["Compilations"].set_visible(enabled)
 
+        # The album groups page only exists while the setting is on.
+        album_groups = self.settings.album_groups_enabled
+        self.navigation_rows["Album groups"].set_visible(album_groups)
+
+        if not album_groups and self._current_page == "Album groups":
+            self._select_page("Albums")
+
         if (
                 not enabled
                 and self.content_stack.get_visible_child_name() == "compilations"
@@ -1031,7 +1063,7 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self._apply_transitions()
 
-        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
+        for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Album groups", "Artists", "Search"):
             self.views[name].set_tracks(self.tracks)
 
     def _update_playlist_categories(self, categories):
@@ -1278,6 +1310,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Most played"].set_tracks(tracks)
         self.views["Search"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
+        self.views["Album groups"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(
             self.database,
@@ -1511,6 +1544,13 @@ class MelodyWindow(Adw.ApplicationWindow):
                     show_error_dialog(
                         self, "Could not save the track's kind", error,
                     )
+                    return
+
+            if "rating" in values and int(values["rating"]) != int(track.get("rating") or 0):
+                try:
+                    self.database.set_rating(track["id"], values["rating"])
+                except Exception as error:
+                    show_error_dialog(self, "Could not save the rating", error)
                     return
 
             if "replaygain" in values and not self._save_replaygain(
@@ -2428,7 +2468,62 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self.views["Playlists"].refresh()
 
+    def _edit_album_group(self, group):
+        """Edit an album group: the title (every album of the group takes it)
+        and the artwork (set on each album)."""
+        show_edit_album_group_dialog(
+            self,
+            group,
+            self.tracks,
+            lambda values: self._save_album_group(group, values),
+        )
+
+    def _save_album_group(self, group, values):
+        image = values.get("image")
+        new_title = values.get("title", group["title"]).strip()
+        renamed = new_title != group["title"]
+        track_ids = [track["id"] for track in group["tracks"]]
+        result = {"moved": 0, "errors": [], "merged": False}
+
+        # Each album of the group takes the new title. An album that already
+        # has that title (by the same artist) is merged into it.
+        if renamed:
+            for album in group["albums"]:
+                try:
+                    part = self.library_editor.rename_album(
+                        album["artist"],
+                        album["title"],
+                        new_title,
+                        allow_merge=True,
+                    )
+                except Exception as error:
+                    result["errors"].append(f"{album['title']}: {error}")
+                    continue
+
+                result["moved"] += part.get("moved", 0)
+                result["errors"].extend(part.get("errors", []))
+
+        if image:
+            for album in group["albums"]:
+                self._apply_image(
+                    result,
+                    lambda album=album: self.library_editor.set_album_image(
+                        album["artist"],
+                        new_title,
+                        image,
+                        apply_to_tracks=False,
+                    ),
+                )
+
+        self._finish_collection_rename(
+            result, "album", refresh_artwork_ids=track_ids,
+        )
+
     def _edit_album(self, album):
+        if "albums" in album:
+            self._edit_album_group(album)
+            return
+
         def save(values):
             image = values.get("image")
             apply_to_tracks = bool(values.get("apply_to_tracks"))
@@ -2549,6 +2644,15 @@ class MelodyWindow(Adw.ApplicationWindow):
         (there is no Save step outside the edit window). The image becomes the
         album's cover; the tracks keep their own images (the edit window's
         "Apply artwork" button writes it into them)."""
+        if "albums" in album:
+            # A group: the picture is set on each of its albums.
+            show_image_picker(
+                self,
+                album_search(album["artists"][0], album["title"]),
+                lambda data: self._apply_album_image(album, data),
+            )
+            return
+
         track_ids = [track["id"] for track in album["tracks"]]
 
         show_image_picker(
@@ -2559,6 +2663,26 @@ class MelodyWindow(Adw.ApplicationWindow):
 
     def _apply_album_image(self, album, data):
         """Make ``data`` the album's cover (the tracks keep their own images)."""
+        if "albums" in album:
+            result = {"errors": []}
+
+            for member in album["albums"]:
+                self._apply_image(
+                    result,
+                    lambda member=member: self.library_editor.set_album_image(
+                        member["artist"],
+                        member["title"],
+                        data,
+                        apply_to_tracks=False,
+                    ),
+                )
+
+            self._finish_collection_rename(
+                result,
+                "album",
+                refresh_artwork_ids=[track["id"] for track in album["tracks"]],
+            )
+            return
         track_ids = [track["id"] for track in album["tracks"]]
         result = {"errors": []}
         self._apply_image(
@@ -2863,6 +2987,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Most played"].set_tracks(tracks)
         self.views["Search"].set_tracks(tracks)
         self.views["Albums"].set_tracks(tracks)
+        self.views["Album groups"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)
 

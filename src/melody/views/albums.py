@@ -37,11 +37,56 @@ from melody.widgets.track_table import (
 from melody.widgets.value_label import value_label
 
 
+def _group_albums(albums):
+    """The albums grouped by title: each group holds the albums that share a
+    title (by different artists), shown as one album with all their tracks."""
+    groups = {}
+
+    for album in albums:
+        key = album["title"].strip().casefold()
+        group = groups.get(key)
+
+        if group is None:
+            group = groups[key] = {
+                "title": album["title"],
+                "artists": [],
+                "albums": [],
+                "tracks": [],
+                "artwork_path": None,
+            }
+
+        group["albums"].append(album)
+
+        if album["artist"] not in group["artists"]:
+            group["artists"].append(album["artist"])
+
+        group["tracks"].extend(album["tracks"])
+
+        if not group["artwork_path"]:
+            group["artwork_path"] = album.get("artwork_path")
+
+    for group in groups.values():
+        group["artists"].sort(key=str.casefold)
+        group["artist"] = ", ".join(group["artists"])
+
+    return list(groups.values())
+
+
 class AlbumsView(Gtk.Box):
     ALBUM_COVER_SIZE = 64
 
-    def __init__(self):
+    def __init__(self, grouped=False):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        # Album groups (see ``_group_albums``): the same page, with the albums
+        # that share a title shown as one.
+        self.grouped = grouped
+        # The columns of an album's track list (a group's tracks come from
+        # several albums, so their artist is shown too).
+        self._track_columns = (
+            ("title", "artist", "play_count", "duration")
+            if grouped else ALBUM_COLUMNS
+        )
 
         self.tracks = []
         self.albums = []
@@ -98,7 +143,7 @@ class AlbumsView(Gtk.Box):
             # The album whose page is open now.
             if self.current_album is not None:
                 callback(paths, {
-                    "artist": self.current_album["artist"],
+                    "artist": (self.current_album.get("artists") or [self.current_album["artist"]])[0],
                     "album": self.current_album["title"],
                 })
 
@@ -218,7 +263,7 @@ class AlbumsView(Gtk.Box):
         header.set_margin_end(24)
         header.set_margin_top(16)
 
-        title = Gtk.Label(label="Albums", xalign=0)
+        title = Gtk.Label(label=("Album groups" if self.grouped else "Albums"), xalign=0)
         title.add_css_class("title-2")
         title.set_hexpand(True)
 
@@ -375,6 +420,9 @@ class AlbumsView(Gtk.Box):
 
         self.albums = list(albums.values())
 
+        if self.grouped:
+            self.albums = _group_albums(self.albums)
+
         for album in self.albums:
             album["tracks"].sort(
                 key=lambda track: str(track.get("title") or "").casefold()
@@ -433,17 +481,20 @@ class AlbumsView(Gtk.Box):
             self.grid_stack.set_visible_child_name("grid")
             self.stack.set_visible_child_name("grid")
 
+        noun = "group" if self.grouped else "album"
         self.count_label.set_text(
-            f"{visible} of {total} albums"
+            f"{visible} of {total} {noun}s"
             if visible != total
-            else f"{total} album{'s' if total != 1 else ''}"
+            else f"{total} {noun}{'s' if total != 1 else ''}"
         )
 
         self._update_play_buttons()
 
     @staticmethod
     def _on_open_album_artist(album):
-        open_artist_named(album["artist"])
+        # A group has several artists: its first one (in A-Z order) is opened.
+        artists = album.get("artists") or [album["artist"]]
+        open_artist_named(artists[0])
 
     def _on_edit_album_from_grid(self, album):
         if self.on_rename_album is not None:
@@ -512,11 +563,9 @@ class AlbumsView(Gtk.Box):
 
         self.details_album_title = value_label(css_classes=("title-1",))
 
-        self.details_artist = value_label(
-            css_classes=("title-3", "dim-label"),
-        )
-        # Clicking the artist opens the artist's page.
-        make_link(self.details_artist, self._on_artist_link_clicked)
+        # The artists: one link for an album, one for each artist of a group.
+        self.details_artist = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.details_artist.set_halign(Gtk.Align.START)
 
         self.details_track_count = Gtk.Label(xalign=0)
         self.details_track_count.add_css_class("dim-label")
@@ -574,7 +623,7 @@ class AlbumsView(Gtk.Box):
         track_header = TrackTableHeader(
             self.track_sort,
             self._refresh_detail_tracks,
-            columns=ALBUM_COLUMNS,
+            columns=self._track_columns,
             margin_start=24,
             margin_end=24,
         )
@@ -591,9 +640,9 @@ class AlbumsView(Gtk.Box):
 
     def _show_album(self, album):
         self.current_album = album
-        self.details_heading.set_text("Album")
+        self.details_heading.set_text("Album group" if self.grouped else "Album")
         self.details_album_title.set_text(album["title"])
-        self.details_artist.set_text(album["artist"])
+        self._set_artist_links(album.get("artists") or [album["artist"]])
 
         track_count = len(album["tracks"])
         self.details_track_count.set_text(
@@ -612,8 +661,30 @@ class AlbumsView(Gtk.Box):
         self.stack.set_visible_child_name("details")
         self._update_play_buttons()
 
+    def _set_artist_links(self, names):
+        """The artists of the album shown: each name is a link to its page."""
+        child = self.details_artist.get_first_child()
+
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self.details_artist.remove(child)
+            child = next_child
+
+        for index, name in enumerate(names):
+            if index:
+                separator = Gtk.Label(label=", ")
+                separator.add_css_class("title-3")
+                separator.add_css_class("dim-label")
+                self.details_artist.append(separator)
+
+            link = Gtk.Label(label=name, xalign=0)
+            link.add_css_class("title-3")
+            link.add_css_class("dim-label")
+            make_link(link, lambda name=name: open_artist_named(name))
+            self.details_artist.append(link)
+
     def _create_track_row(self, track):
-        row = create_track_row(track, columns=ALBUM_COLUMNS)
+        row = create_track_row(track, columns=self._track_columns)
 
         if self._edit_track is not None:
             attach_track_context_menu(
@@ -684,7 +755,7 @@ class AlbumsView(Gtk.Box):
     def _on_import_clicked(self):
         if self.current_album is not None and self.on_import is not None:
             self.on_import({
-                "artist": self.current_album["artist"],
+                "artist": (self.current_album.get("artists") or [self.current_album["artist"]])[0],
                 "album": self.current_album["title"],
             })
 

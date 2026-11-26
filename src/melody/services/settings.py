@@ -12,6 +12,9 @@ DEFAULTS = {
     "compilation_threshold": 900.0,
     # Also list compilations in the album their file belongs to.
     "show_compilations_in_albums": False,
+    # Show a page of album groups under Albums: albums that share a title are
+    # grouped together, so the same name appears once.
+    "album_groups_enabled": False,
     # What the Recent page shows: the N most recently added tracks. Set in
     # the page's own header.
     "recent_count": 30.0,
@@ -191,6 +194,14 @@ class Settings:
     @show_compilations_in_albums.setter
     def show_compilations_in_albums(self, value):
         self.set("show_compilations_in_albums", value)
+
+    @property
+    def album_groups_enabled(self) -> bool:
+        return self._values["album_groups_enabled"]
+
+    @album_groups_enabled.setter
+    def album_groups_enabled(self, value):
+        self.set("album_groups_enabled", value)
 
     @property
     def recent_count(self) -> float:

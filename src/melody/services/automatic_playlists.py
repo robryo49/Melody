@@ -38,6 +38,7 @@ FIELDS = {
     "genre": ("Genre", "text"),
     "year": ("Year", "number"),
     "play_count": ("Play count", "number"),
+    "rating": ("Rating (stars)", "number"),
     "duration": ("Duration (minutes)", "number"),
     "added": ("Date added", "date"),
     "favorite": ("Favorite", "flag"),
@@ -81,6 +82,7 @@ SORT_KEYS = {
     "album": "Album",
     "year": "Year",
     "play_count": "Play count",
+    "rating": "Rating",
     "duration": "Duration",
     "added": "Date added",
 }
@@ -303,6 +305,10 @@ def _field_value(track, field):
     if field == "play_count":
         return int(track.get("play_count") or 0)
 
+    if field == "rating":
+        # Ratings are kept in half stars: a condition counts whole stars.
+        return int(track.get("rating") or 0) / 2
+
     if field == "duration":
         return track_length(track) / 60
 
@@ -397,6 +403,9 @@ def _sort_value(track, key):
 
     if key == "play_count":
         return int(track.get("play_count") or 0)
+
+    if key == "rating":
+        return int(track.get("rating") or 0)
 
     if key == "duration":
         return track_length(track)

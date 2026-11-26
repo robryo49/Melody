@@ -34,6 +34,7 @@ from melody.widgets.cover_style import install_cover_css
 from melody.widgets.gain_slider import GainSlider
 from melody.widgets.image_picker import show_image_picker, texture_from_bytes
 from melody.widgets.range_selector import TimeRangeSelector
+from melody.widgets.star_rating import StarRating
 
 
 SORT_OPTIONS = ["Title", "Album", "Artist", "Duration", "Play Count"]
@@ -1087,6 +1088,7 @@ def show_edit_dialog(
         round_cover=False,
         info=None,
         replaygain_spec=None,
+        rating_spec=None,
 ):
     """Open a window with a cover on the left and editable fields on the right.
 
@@ -1318,6 +1320,16 @@ def show_edit_dialog(
     cover_column.set_valign(Gtk.Align.START)
     cover_column.append(cover_overlay)
 
+    # The rating, right under the artwork. Only for a track of the library:
+    # a track being imported has none yet (``rating_spec`` is then None).
+    rating_widget = None
+    rating_initial = None
+
+    if rating_spec is not None:
+        rating_initial = int(rating_spec.get("initial") or 0)
+        rating_widget = StarRating(rating_initial)
+        cover_column.append(rating_widget)
+
     apply_button = None
     if apply_artwork:
         apply_button = Gtk.ToggleButton(label="Apply artwork")
@@ -1460,6 +1472,12 @@ def show_edit_dialog(
         compilation_check.set_tooltip_text(compilation_spec.get("tooltip"))
         cover_column.append(compilation_check)
 
+    def rating_changed():
+        return (
+            rating_widget is not None
+            and rating_widget.value() != rating_initial
+        )
+
     def compilation_changed():
         return (
             compilation_check is not None
@@ -1502,6 +1520,7 @@ def show_edit_dialog(
             or range_changed()
             or gain_changed()
             or compilation_changed()
+            or rating_changed()
         )
 
     def on_changed(*_args):
@@ -1528,6 +1547,8 @@ def show_edit_dialog(
             values["kind"] = compilation_kind()
         if gain_slider is not None:
             values["replaygain"] = gain_slider.value
+        if rating_widget is not None:
+            values["rating"] = rating_widget.value()
         window.close()
         callback(values)
 
@@ -1540,6 +1561,9 @@ def show_edit_dialog(
 
     if compilation_check is not None:
         compilation_check.connect("toggled", on_changed)
+
+    if rating_widget is not None:
+        rating_widget.connect_changed(on_changed)
 
     if gain_slider is not None:
         gain_slider.connect_changed(on_changed)
@@ -1780,6 +1804,12 @@ def show_edit_track_dialog(
             ("ReplayGain", "Not available for this type of file"),
         ]
 
+    # The rating, for a track of the library (an imported track has none yet).
+    rating_spec = (
+        {"initial": track.get("rating") or 0}
+        if track.get("id") is not None else None
+    )
+
     show_edit_dialog(
         parent,
         window_title,
@@ -1793,6 +1823,7 @@ def show_edit_track_dialog(
         allow_unchanged=allow_unchanged,
         info=info,
         replaygain_spec=replaygain_spec,
+        rating_spec=rating_spec,
     )
 
 
@@ -1839,6 +1870,41 @@ def show_edit_album_dialog(parent, album, library_tracks, callback):
             values["title"],
         ),
         apply_artwork=True,
+    )
+
+
+def show_edit_album_group_dialog(parent, group, library_tracks, callback):
+    """Edit an album group: its title, which every album of the group takes,
+    and its artwork. The artists are left alone: they belong to each album.
+
+    ``callback`` receives ``{"title": ...}``, and ``"image"`` (raw bytes) when
+    a new picture was chosen.
+    """
+    library_tracks = list(library_tracks)
+    artists = group.get("artists") or [group["artist"]]
+
+    specs = [
+        {
+            "key": "title",
+            "label": "Album",
+            "initial": group["title"],
+            "noun": "album",
+            "suggestions": _album_suggestions(library_tracks),
+        },
+    ]
+
+    show_edit_dialog(
+        parent,
+        "Edit album group",
+        specs,
+        callback,
+        cover_path=group.get("artwork_path"),
+        placeholder_icon="media-optical-symbolic",
+        hint=(
+            "Renaming changes the title of every album in this group. The "
+            "artwork is set on each of them."
+        ),
+        image_search=lambda values: album_search(artists[0], values["title"]),
     )
 
 

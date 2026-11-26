@@ -67,6 +67,8 @@ class Database:
                 "play_count": "INTEGER NOT NULL DEFAULT 0",
                 # 1 for a track marked as a favorite (the heart in the lists).
                 "favorite": "INTEGER NOT NULL DEFAULT 0",
+                # The rating, in half stars: 0 for none, 10 for five stars.
+                "rating": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -400,6 +402,20 @@ class Database:
             cursor = connection.execute(
                 "UPDATE tracks SET favorite = ? WHERE id = ?",
                 (1 if favorite else 0, track_id),
+            )
+
+            if cursor.rowcount == 0:
+                raise KeyError(f"Track does not exist: {track_id}")
+
+    def set_rating(self, track_id: str, rating: int):
+        """Rate a track, in half stars: 0 for none, 10 for five full stars."""
+        if not 0 <= int(rating) <= 10:
+            raise ValueError(f"Invalid rating: {rating}")
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tracks SET rating = ? WHERE id = ?",
+                (int(rating), track_id),
             )
 
             if cursor.rowcount == 0:

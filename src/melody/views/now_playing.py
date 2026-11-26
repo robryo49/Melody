@@ -80,7 +80,6 @@ class NowPlayingView(Gtk.Box):
         placeholder.set_pixel_size(96)
 
         self.artwork_stack = Gtk.Stack()
-        self.artwork_stack.add_css_class("card")
         self.artwork_stack.set_overflow(Gtk.Overflow.HIDDEN)
         self.artwork_stack.set_size_request(
             self.ARTWORK_SIZE,

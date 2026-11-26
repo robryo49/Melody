@@ -25,6 +25,7 @@ from melody.services.collection_actions import (
     track_is_playing,
 )
 from melody.widgets.link_label import make_link
+from melody.widgets.star_rating import StarRating, rate_track
 from melody.widgets.file_drop import enable_file_drop
 from melody.widgets.track_table import (
     DEFAULT_COLUMNS,
@@ -383,6 +384,12 @@ class LibraryView(Gtk.Box):
         self.details_panel.append(self.details_duration)
         self.details_panel.append(self.details_plays)
 
+        # The rating of the selected track. Clicking the stars sets it.
+        self.details_rating = StarRating(0)
+        self.details_rating.connect_changed(self._on_rating_changed)
+        self.details_rating.set_visible(False)
+        self.details_panel.append(self.details_rating)
+
         self.details_path = self._create_detail_label()
         self.details_path.set_halign(Gtk.Align.START)
         self.details_path.set_size_request(-1, -1)
@@ -576,6 +583,12 @@ class LibraryView(Gtk.Box):
         elif tracks:
             toggle_favorite(tracks[0])
 
+    def _on_rating_changed(self, rating):
+        track = self._selected_track()
+
+        if track is not None:
+            rate_track(track, rating)
+
     def _on_playlist_button_clicked(self, button):
         tracks = self._selected_tracks()
 
@@ -714,6 +727,8 @@ class LibraryView(Gtk.Box):
         )
         self.details_path.set_text(track_path)
         self.details_plays.set_text(self._plays_text(track))
+        self.details_rating.set_value(int(track.get("rating") or 0))
+        self.details_rating.set_visible(True)
         self._update_action_buttons()
 
         self.artwork_stack.set_visible_child_name("placeholder")
@@ -767,6 +782,7 @@ class LibraryView(Gtk.Box):
         self.artwork_stack.set_visible_child_name("placeholder")
         self.details_artwork.set_filename(None)
         self.details_title.set_text(f"{len(tracks)} tracks selected")
+        self.details_rating.set_visible(False)
         self.details_artist.set_text("")
         self.details_album.set_text("")
         self.details_duration.set_text(self._format_duration(total))
@@ -778,6 +794,7 @@ class LibraryView(Gtk.Box):
         self.artwork_stack.set_visible_child_name("placeholder")
         self.details_artwork.set_filename(None)
         self.details_title.set_text("No track selected")
+        self.details_rating.set_visible(False)
         self.details_artist.set_text("")
         self.details_album.set_text("")
         self.details_duration.set_text("")

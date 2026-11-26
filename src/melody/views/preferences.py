@@ -92,6 +92,7 @@ class PreferencesView(Gtk.Box):
 
         self._create_library_group()
         self._create_organization_group()
+        self._create_album_groups_group()
         self._create_import_group()
         self._create_compilations_group()
         self._create_playback_group()
@@ -259,6 +260,31 @@ class PreferencesView(Gtk.Box):
         group.add(self.organize_files)
 
         self._pages["library"].add(group)
+
+    def _create_album_groups_group(self):
+        group = Adw.PreferencesGroup(
+            title="Albums",
+            description="How the albums are listed.",
+        )
+
+        self.album_groups_row = Adw.SwitchRow(
+            title="Album groups",
+            subtitle=(
+                "Add a page of albums under Albums where albums that share a "
+                "title are grouped together, so the same name appears once."
+            ),
+        )
+        self.album_groups_row.set_active(self.settings.album_groups_enabled)
+        self.album_groups_row.connect(
+            "notify::active",
+            self._on_album_groups_toggled,
+        )
+        group.add(self.album_groups_row)
+
+        self._pages["library"].add(group)
+
+    def _on_album_groups_toggled(self, row, _pspec):
+        self.settings.album_groups_enabled = row.get_active()
 
     def _create_import_group(self):
         group = Adw.PreferencesGroup(
