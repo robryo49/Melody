@@ -2418,6 +2418,16 @@ def set_track_deletion(delete_track):
     _track_deletion["delete"] = delete_track
 
 
+def delete_tracks(tracks):
+    """Delete ``tracks`` from a menu: one track through its own confirmation,
+    several through the menu of the selection."""
+    if len(tracks) == 1 and _track_deletion["delete"] is not None:
+        _track_deletion["delete"](tracks[0])
+        return
+
+    run_tracks_action("delete", tracks)
+
+
 def _tracks_menu_entries(tracks, on_remove_from_playlist, exclude_playlist_id):
     """The entries of the menu of several selected tracks, as
     ``_show_entries_menu`` takes them."""
@@ -2436,6 +2446,7 @@ def _tracks_menu_entries(tracks, on_remove_from_playlist, exclude_playlist_id):
     entries.append(None)
     add("Set album…", "set_album")
     add("Set artist…", "set_artist")
+    add("Set artwork…", "set_artwork")
 
     entries.append(None)
     add(
@@ -2552,6 +2563,7 @@ def attach_track_context_menu(
                 ),
                 position=position,
                 heading=f"{len(selected)} tracks selected",
+                keep_selection=True,
             )
             return
 
@@ -2642,21 +2654,57 @@ def attach_track_context_menu(
     row.add_controller(gesture)
 
 
-def attach_context_menu(widget, get_entries):
+def attach_context_menu(widget, get_entries, keep_selection=False):
     """Right-click menu for any widget (used by the grid cards).
 
     ``get_entries()`` is called when the menu opens and returns a list of
     ``(label, callback)`` pairs, so labels like Play/Pause are always current.
-    A ``None`` in the list is drawn as a separator.
+    A ``None`` in the list is drawn as a separator. With ``keep_selection``
+    the selection of the row's list is kept when the menu closes.
     """
     gesture = Gtk.GestureClick.new()
     gesture.set_button(3)
 
     def on_pressed(_gesture, _press_count, x, y):
-        _show_entries_menu(widget, x, y, get_entries())
+        _show_entries_menu(
+            widget,
+            x,
+            y,
+            get_entries(),
+            keep_selection=keep_selection,
+        )
 
     gesture.connect("pressed", on_pressed)
     widget.add_controller(gesture)
+
+
+def _keep_row_selection(popover, row):
+    """Select again the rows that were selected when the menu of ``row`` opened,
+    once the menu has closed, however it closed.
+
+    GTK moves the focus back to the row as a popover closes, which can clear a
+    selection of several rows. It is set again a moment later, when that is
+    over. Rows that are no longer in the list (it was rebuilt by the action)
+    are left out.
+    """
+    list_box = row.get_parent() if isinstance(row, Gtk.ListBoxRow) else None
+
+    if (
+            not isinstance(list_box, Gtk.ListBox)
+            or list_box.get_selection_mode() != Gtk.SelectionMode.MULTIPLE
+    ):
+        return
+
+    snapshot = list(list_box.get_selected_rows())
+
+    def restore():
+        for selected in snapshot:
+            if selected.get_parent() is list_box:
+                list_box.select_row(selected)
+
+        return GLib.SOURCE_REMOVE
+
+    popover.connect("closed", lambda _popover: GLib.timeout_add(50, restore))
 
 
 def _show_entries_menu(
@@ -2667,6 +2715,7 @@ def _show_entries_menu(
         *,
         position=Gtk.PositionType.BOTTOM,
         heading=None,
+        keep_selection=False,
 ):
     """Open a context menu on ``widget``, its top-left corner at (x, y).
 
@@ -2729,4 +2778,6 @@ def _show_entries_menu(
     popover.set_child(menu)
     popover.set_pointing_to(rect)
     popover.connect("closed", lambda _popover: popover.unparent())
+    if keep_selection:
+        _keep_row_selection(popover, widget)
     popover.popup()

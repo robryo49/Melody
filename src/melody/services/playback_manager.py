@@ -736,6 +736,56 @@ class PlaybackManager:
         self._reset_shuffle_after_edit()
         return True
 
+    def play_queued_many_next(self, indexes):
+        """Move the tracks at ``indexes`` to right after the one being played,
+        keeping their order in the queue. The one being played does not move."""
+        if not 0 <= self.current_index < len(self.queue):
+            return
+
+        current = self.current_index
+        moved = {
+            index for index in indexes
+            if 0 <= index < len(self.queue) and index != current
+        }
+
+        if not moved:
+            return
+
+        order = range(len(self.queue))
+        before = [index for index in order if index < current and index not in moved]
+        after = [index for index in order if index > current and index not in moved]
+
+        self.queue = [
+            self.queue[index]
+            for index in before + [current] + sorted(moved) + after
+        ]
+        self.current_index = len(before)
+        self.queue_version += 1
+        self._reset_shuffle_after_edit()
+
+    def remove_many_from_queue(self, indexes):
+        """Take the tracks at ``indexes`` out of the queue. The one being played
+        stays. Returns how many were taken out."""
+        if not 0 <= self.current_index < len(self.queue):
+            return 0
+
+        gone = {
+            index for index in indexes
+            if 0 <= index < len(self.queue) and index != self.current_index
+        }
+
+        if not gone:
+            return 0
+
+        self.current_index -= sum(1 for index in gone if index < self.current_index)
+        self.queue = [
+            track for index, track in enumerate(self.queue)
+            if index not in gone
+        ]
+        self.queue_version += 1
+        self._reset_shuffle_after_edit()
+        return len(gone)
+
     def play_queued_next(self, index):
         """Move the track at ``index`` to right after the one being played."""
         if (

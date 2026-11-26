@@ -72,6 +72,18 @@ row:hover .track-heart,
 .track-heart.favorite {
     opacity: 1;
 }
+
+/* The track being played: a little lighter than hovering over a row, and
+   lighter than the selection colour when it is selected. */
+row.now-playing {
+    background-color: alpha(@view_fg_color, 0.05);
+}
+row.now-playing:hover {
+    background-color: alpha(@view_fg_color, 0.05);
+}
+row.now-playing:selected {
+    background-color: alpha(mix(@accent_bg_color, #ffffff, 0.15), 0.35);
+}
 """
 _css_installed = False
 
@@ -488,6 +500,47 @@ def update_favorite_in_list(list_box, track_id, favorite):
 
 
 # ----------------------------------------------------------------------
+# The track being played
+# ----------------------------------------------------------------------
+
+# The id of the track being played, or None. Rows made from now on are
+# highlighted if they show it (see ``create_track_row``).
+_playing_track_id = None
+
+
+def _is_playing(track):
+    return (
+        _playing_track_id is not None
+        and track.get("id") == _playing_track_id
+    )
+
+
+def set_playing_track(root, track_id):
+    """Highlight the rows of every track list under ``root`` (a window) that
+    show the track ``track_id``, and only those. ``None`` highlights none."""
+    global _playing_track_id
+    _playing_track_id = track_id
+    _mark_playing_rows(root)
+
+
+def _mark_playing_rows(widget):
+    if isinstance(widget, Gtk.ListBoxRow):
+        track = getattr(widget, "track", None)
+
+        if track is not None:
+            if _is_playing(track):
+                widget.add_css_class("now-playing")
+            else:
+                widget.remove_css_class("now-playing")
+
+    child = widget.get_first_child()
+
+    while child is not None:
+        _mark_playing_rows(child)
+        child = child.get_next_sibling()
+
+
+# ----------------------------------------------------------------------
 # Rows
 # ----------------------------------------------------------------------
 
@@ -504,8 +557,13 @@ def create_track_row(
     ``ARTWORK_WIDTH``, for the lists whose header was made ``with_artwork``.
     The row carries its track as ``row.track``.
     """
+    _install_css()
+
     row = Gtk.ListBoxRow()
     row.track = track
+
+    if _is_playing(track):
+        row.add_css_class("now-playing")
 
     cells = []
     widgets = []

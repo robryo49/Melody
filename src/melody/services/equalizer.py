@@ -131,6 +131,11 @@ class Equalizer:
         """``callback()`` runs whenever the equalizer changes."""
         self._callbacks.append(callback)
 
+    def disconnect_changed(self, callback):
+        """Stop calling ``callback()`` (see ``connect_changed``)."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
     def _changed(self):
         if self._save_source is None:
             self._save_source = GLib.timeout_add(SAVE_DELAY, self._save)

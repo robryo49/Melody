@@ -1,10 +1,15 @@
-"""The equalizer window: an on/off switch, a list of presets and one slider per
-band, and below them the ReplayGain switch.
+"""The equalizer, and the ReplayGain switch that goes with it.
 
-It is modal, like the other windows: the main window is locked (and dimmed by
-the desktop) while it is open, and the window stays attached to it. Every
-change to the sliders is heard at once, and the media keys still pause or skip
-the music.
+``EqualizerControls`` holds the on and off switch, the presets, the reset
+button and one slider per band. ``ReplayGainControls`` holds the ReplayGain
+switch and its "Analyse…" button. Both show and change the same settings
+wherever they are shown: the equalizer window (``show_equalizer_dialog``) and
+the Playback tab of the preferences use them. Every change is heard at once,
+and the controls follow the equalizer when it is changed from elsewhere.
+
+The equalizer window is modal, like the other windows: the main window is
+locked (and dimmed by the desktop) while it is open, and the window stays
+attached to it.
 """
 
 import gi
@@ -35,54 +40,35 @@ def _format_gain(gain):
     return "0" if gain == 0 else f"{gain:+g}"
 
 
-class _EqualizerWindow(Adw.Window):
-    def __init__(self, parent, equalizer, available=True, analyse=None):
-        super().__init__()
+class EqualizerControls(Gtk.Box):
+    """The equalizer's switch, presets and sliders.
+
+    ``available`` is False when the player has no equalizer (GStreamer's
+    plugin is missing): a note takes the place of the controls. Call
+    ``release()`` when the controls are no longer shown, so they stop
+    following the equalizer.
+    """
+
+    def __init__(self, equalizer, available=True):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
 
         self.equalizer = equalizer
-        # ``analyse(window)`` opens the ReplayGain analysis (None: no button).
-        self._analyse = analyse
-        # False when the player has no equalizer (its GStreamer plugin is
-        # missing): the sliders are then replaced by a note.
         self.available = available
         # True while the controls are being set to match the equalizer, so
         # that is not taken for the person moving them.
         self._syncing = False
 
-        self.set_title("Equalizer")
-        self.set_transient_for(parent)
-        # Like the other windows, it locks the main window while it is open
-        # (and the desktop keeps it attached to it, centered over it).
-        self.set_modal(True)
-        self.set_destroy_with_parent(True)
-        # Fixed size: the width given here, the height the content needs.
-        self.set_resizable(False)
-        self.set_size_request(640, -1)
-        self.set_default_size(640, -1)
-
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        content.set_margin_start(18)
-        content.set_margin_end(18)
-        content.set_margin_top(12)
-        content.set_margin_bottom(18)
-
         if available:
-            content.append(self._build_top_row())
-            content.append(self._build_sliders())
+            self.append(self._build_top_row())
+            self.append(self._build_sliders())
         else:
-            content.append(self._build_unavailable_note())
+            self.append(self._build_unavailable_note())
 
-        content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-        content.append(self._build_replaygain_row())
-
-        header = Adw.HeaderBar()
-        toolbar = Adw.ToolbarView()
-        toolbar.add_top_bar(header)
-        toolbar.set_content(content)
-        self.set_content(toolbar)
-
-        self.connect("close-request", self._on_close_request)
+        equalizer.connect_changed(self._on_equalizer_changed)
         self._sync()
+
+    def release(self):
+        self.equalizer.disconnect_changed(self._on_equalizer_changed)
 
     # ------------------------------------------------------------------
     # Layout
@@ -98,52 +84,6 @@ class _EqualizerWindow(Adw.Window):
         note.set_wrap(True)
         note.add_css_class("dim-label")
         return note
-
-    def _build_replaygain_row(self):
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-
-        self.replaygain_switch = Gtk.Switch()
-        self.replaygain_switch.set_valign(Gtk.Align.CENTER)
-        self.replaygain_switch.connect(
-            "notify::active",
-            self._on_replaygain_changed,
-        )
-
-        title = Gtk.Label(label="ReplayGain", xalign=0)
-        title.add_css_class("heading")
-
-        description = Gtk.Label(
-            label="Play tracks that have a ReplayGain tag at an even "
-                  "volume, and show that tag when editing a track, where "
-                  "it can be changed or set.",
-            xalign=0,
-        )
-        description.set_wrap(True)
-        description.set_max_width_chars(1)
-        description.add_css_class("dim-label")
-        description.add_css_class("caption")
-
-        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        labels.set_hexpand(True)
-        labels.append(title)
-        labels.append(description)
-
-        row.append(self.replaygain_switch)
-        row.append(labels)
-
-        if self._analyse is not None:
-            analyse_button = Gtk.Button(label="Analyse…")
-            analyse_button.set_valign(Gtk.Align.CENTER)
-            analyse_button.set_tooltip_text(
-                "Measure how loud tracks are and set their ReplayGain"
-            )
-            analyse_button.connect(
-                "clicked",
-                lambda _button: self._analyse(self),
-            )
-            row.append(analyse_button)
-
-        return row
 
     def _build_top_row(self):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -239,32 +179,33 @@ class _EqualizerWindow(Adw.Window):
     # The controls follow the equalizer
     # ------------------------------------------------------------------
 
+    def _on_equalizer_changed(self):
+        self._sync()
+
     def _sync(self):
         """Set every control to what the equalizer holds."""
-        self._syncing = True
-
-        self.replaygain_switch.set_active(self.equalizer.replaygain_enabled)
-
         if not self.available:
-            self._syncing = False
             return
 
-        self.switch.set_active(self.equalizer.enabled)
+        self._syncing = True
 
-        for scale, label, gain in zip(
-                self.scales, self.value_labels, self.equalizer.gains,
-        ):
-            scale.set_value(gain)
-            label.set_text(_format_gain(gain))
+        try:
+            self.switch.set_active(self.equalizer.enabled)
 
-        self._sync_preset()
+            for scale, label, gain in zip(
+                    self.scales, self.value_labels, self.equalizer.gains,
+            ):
+                scale.set_value(gain)
+                label.set_text(_format_gain(gain))
 
-        # Nothing to move while the equalizer is off.
-        self.sliders_box.set_sensitive(self.equalizer.enabled)
-        self.preset_dropdown.set_sensitive(self.equalizer.enabled)
-        self.reset_button.set_sensitive(self.equalizer.enabled)
+            self._sync_preset()
 
-        self._syncing = False
+            # Nothing to move while the equalizer is off.
+            self.sliders_box.set_sensitive(self.equalizer.enabled)
+            self.preset_dropdown.set_sensitive(self.equalizer.enabled)
+            self.reset_button.set_sensitive(self.equalizer.enabled)
+        finally:
+            self._syncing = False
 
     def _sync_preset(self):
         self.preset_dropdown.set_selected(
@@ -275,18 +216,11 @@ class _EqualizerWindow(Adw.Window):
     # The person's changes
     # ------------------------------------------------------------------
 
-    def _on_replaygain_changed(self, switch, _pspec):
-        if self._syncing:
-            return
-
-        self.equalizer.set_replaygain_enabled(switch.get_active())
-
     def _on_enabled_changed(self, switch, _pspec):
         if self._syncing:
             return
 
         self.equalizer.set_enabled(switch.get_active())
-        self._sync()
 
     def _on_scale_changed(self, scale, index):
         if self._syncing:
@@ -299,8 +233,10 @@ class _EqualizerWindow(Adw.Window):
 
         # Moving a slider makes it "Custom", unless it lands on a preset.
         self._syncing = True
-        self._sync_preset()
-        self._syncing = False
+        try:
+            self._sync_preset()
+        finally:
+            self._syncing = False
 
     def _on_preset_selected(self, dropdown, _pspec):
         if self._syncing:
@@ -312,15 +248,131 @@ class _EqualizerWindow(Adw.Window):
             return
 
         self.equalizer.set_gains(PRESETS[name])
-        self._sync()
 
     def _on_reset_clicked(self, _button):
         self.equalizer.set_gains(PRESETS["Flat"])
+
+
+class ReplayGainControls(Gtk.Box):
+    """The ReplayGain switch, with a short explanation and, when ``analyse`` is
+    given, the "Analyse…" button: ``analyse(parent)`` opens the analysis, with
+    the window the controls are in as ``parent``.
+
+    Call ``release()`` when the controls are no longer shown.
+    """
+
+    def __init__(self, equalizer, analyse=None):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+        self.equalizer = equalizer
+        self._analyse = analyse
+        self._syncing = False
+
+        self.replaygain_switch = Gtk.Switch()
+        self.replaygain_switch.set_valign(Gtk.Align.CENTER)
+        self.replaygain_switch.connect(
+            "notify::active",
+            self._on_replaygain_changed,
+        )
+
+        title = Gtk.Label(label="ReplayGain", xalign=0)
+        title.add_css_class("heading")
+
+        description = Gtk.Label(
+            label="Play tracks that have a ReplayGain tag at an even "
+                  "volume, and show that tag when editing a track, where "
+                  "it can be changed or set.",
+            xalign=0,
+        )
+        description.set_wrap(True)
+        description.set_max_width_chars(1)
+        description.add_css_class("dim-label")
+        description.add_css_class("caption")
+
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        labels.set_hexpand(True)
+        labels.append(title)
+        labels.append(description)
+
+        self.append(self.replaygain_switch)
+        self.append(labels)
+
+        if analyse is not None:
+            analyse_button = Gtk.Button(label="Analyse…")
+            analyse_button.set_valign(Gtk.Align.CENTER)
+            analyse_button.set_tooltip_text(
+                "Measure how loud tracks are and set their ReplayGain"
+            )
+            analyse_button.connect("clicked", self._on_analyse_clicked)
+            self.append(analyse_button)
+
+        equalizer.connect_changed(self._on_equalizer_changed)
         self._sync()
+
+    def release(self):
+        self.equalizer.disconnect_changed(self._on_equalizer_changed)
+
+    def _on_analyse_clicked(self, _button):
+        self._analyse(self.get_root())
+
+    def _on_equalizer_changed(self):
+        self._sync()
+
+    def _sync(self):
+        self._syncing = True
+
+        try:
+            self.replaygain_switch.set_active(self.equalizer.replaygain_enabled)
+        finally:
+            self._syncing = False
+
+    def _on_replaygain_changed(self, switch, _pspec):
+        if self._syncing:
+            return
+
+        self.equalizer.set_replaygain_enabled(switch.get_active())
+
+
+class _EqualizerWindow(Adw.Window):
+    def __init__(self, parent, equalizer, available=True, analyse=None):
+        super().__init__()
+
+        self.set_title("Equalizer")
+        self.set_transient_for(parent)
+        # Like the other windows, it locks the main window while it is open
+        # (and the desktop keeps it attached to it, centered over it).
+        self.set_modal(True)
+        self.set_destroy_with_parent(True)
+        # Fixed size: the width given here, the height the content needs.
+        self.set_resizable(False)
+        self.set_size_request(640, -1)
+        self.set_default_size(640, -1)
+
+        self.controls = EqualizerControls(equalizer, available)
+        self.replaygain = ReplayGainControls(equalizer, analyse)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_start(18)
+        content.set_margin_end(18)
+        content.set_margin_top(12)
+        content.set_margin_bottom(18)
+        content.append(self.controls)
+        content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        content.append(self.replaygain)
+
+        header = Adw.HeaderBar()
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(header)
+        toolbar.set_content(content)
+        self.set_content(toolbar)
+
+        self.connect("close-request", self._on_close_request)
 
     def _on_close_request(self, _window):
         global _open_window
         _open_window = None
+        self.controls.release()
+        self.replaygain.release()
         return False
 
 

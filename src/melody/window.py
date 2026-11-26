@@ -44,6 +44,7 @@ from melody.services.image_sources import (
     album_search,
     artist_search,
     playlist_search,
+    track_search,
 )
 from melody.services.playlist_artwork import (
     get_playlist_cover,
@@ -111,6 +112,7 @@ from melody.widgets.track_table import (
     RECENT_COLUMNS,
     TrackSort,
     set_favorite_handler,
+    set_playing_track,
 )
 
 
@@ -279,6 +281,7 @@ class MelodyWindow(Adw.ApplicationWindow):
             add_to_queue=self.playback_manager.add_tracks_to_queue,
             set_album=self._set_album_of_tracks,
             set_artist=self._set_artist_of_tracks,
+            set_artwork=self._set_artwork_of_tracks,
             add_to_playlist=self._choose_playlist_for_tracks,
             favorite=self._toggle_favorite_of_tracks,
             delete=self._delete_tracks,
@@ -576,7 +579,7 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.sync_status.append(self.sync_status_label)
 
         self.player_bar = PlayerBar(self.playback_manager)
-        self.playback_manager.on_track_changed = self.player_bar.set_track
+        self.playback_manager.on_track_changed = self._on_track_changed
         self.playback_manager.on_state_changed = (
             self.player_bar.update_playback_state
         )
@@ -728,6 +731,9 @@ class MelodyWindow(Adw.ApplicationWindow):
             self.settings,
             self._rescan_library,
             self._change_music_folder,
+            equalizer=self.equalizer,
+            available=self.playback_manager.has_equalizer,
+            analyse=self._analyse_replaygain,
         )
 
     def _change_music_folder(self, folder, done=None):
@@ -1698,6 +1704,50 @@ class MelodyWindow(Adw.ApplicationWindow):
             # again by a scan in the background (it may need the network,
             # which must not freeze the window).
             self._rescan_library()
+
+    def _set_artwork_of_tracks(self, tracks):
+        """"Set artwork…": pick an image, then embed it as the cover of every
+        selected track's file."""
+        if self._syncing:
+            self._show_library_busy()
+            return
+
+        albums = {str(track.get("album") or "").strip() for track in tracks}
+
+        if len(tracks) > 1 and len(albums) == 1 and next(iter(albums)):
+            # Several tracks of one album: that album's covers are offered.
+            first = tracks[0]
+            search = album_search(
+                str(first.get("album_artist") or first.get("artist") or ""),
+                next(iter(albums)),
+            )
+        else:
+            # Otherwise the covers that go with the first track are offered.
+            first = tracks[0]
+            search = track_search(
+                str(first.get("title") or ""),
+                str(first.get("artist") or ""),
+                str(first.get("album") or ""),
+                self.tracks,
+            )
+
+        show_image_picker(
+            self,
+            search,
+            lambda data: self._apply_tracks_image(tracks, data),
+        )
+
+    def _apply_tracks_image(self, tracks, data):
+        """Embed ``data`` as the cover of each of ``tracks``' files."""
+        track_ids = [track["id"] for track in tracks]
+        result = {"errors": []}
+        self._apply_image(
+            result,
+            lambda: self.library_editor.set_tracks_image(track_ids, data),
+        )
+        self._finish_collection_rename(
+            result, "track", refresh_artwork_ids=track_ids,
+        )
 
     def _delete_tracks(self, tracks):
         """The "Delete" entry of the menu of several selected tracks: ask, then
@@ -2815,6 +2865,12 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.views["Albums"].set_tracks(tracks)
         self.views["Artists"].set_tracks(tracks)
         self.views["Playlists"].set_data(self.database, tracks, self.playback_manager)
+
+    def _on_track_changed(self, track):
+        """The track being played changed (or nothing is playing now): the player
+        bar shows it, and the track lists highlight it."""
+        self.player_bar.set_track(track)
+        set_playing_track(self, track.get("id") if track else None)
 
     def _refresh_player_bar(self):
         """After the library was reloaded, show the playing track as it is now

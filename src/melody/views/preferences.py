@@ -11,16 +11,77 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from melody.services.compilations import format_clock
 from melody.services.import_formats import IMPORT_FORMATS, import_format
+from melody.widgets.equalizer_dialog import EqualizerControls, ReplayGainControls
 from melody.widgets.range_selector import parse_time
 
 
-class PreferencesView(Adw.PreferencesPage):
-    """The preferences. Every change is applied (and saved) right away."""
+# The tabs of the preferences, in order: (name, title, icon). Each tab holds
+# the groups it is given below.
+_TABS = (
+    ("library", "Library", "folder-music-symbolic"),
+    ("compilations", "Compilations", "media-playlist-consecutive-symbolic"),
+    ("playback", "Playback", "media-playback-start-symbolic"),
+    ("import", "Import", "document-save-symbolic"),
+)
 
-    def __init__(self, settings, on_rescan=None, on_change_folder=None):
-        super().__init__(title="Preferences", icon_name="preferences-system-symbolic")
+
+class PreferencesView(Gtk.Box):
+    """The preferences, in tabs. Every change is applied (and saved) right
+    away."""
+
+    def __init__(
+            self,
+            settings,
+            on_rescan=None,
+            on_change_folder=None,
+            equalizer=None,
+            available=True,
+            analyse=None,
+    ):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
 
         self.settings = settings
+        # The equalizer's controls, once they are shown (see ``release``).
+        self.equalizer_controls = None
+        self.replaygain_controls = None
+
+        # One page of the stack for each tab.
+        self._pages = {}
+        self.stack = Adw.ViewStack()
+        self.stack.set_vexpand(True)
+
+        for name, title, icon in _TABS:
+            page = Adw.PreferencesPage()
+            self._pages[name] = page
+            self.stack.add_titled_with_icon(page, name, title, icon)
+
+        # The tabs sit across the top, sharing the whole width equally.
+        tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        tabs.add_css_class("linked")
+        tabs.set_homogeneous(True)
+        tabs.set_hexpand(True)
+        tabs.set_margin_start(12)
+        tabs.set_margin_end(12)
+        tabs.set_margin_top(12)
+
+        first_button = None
+
+        for name, title, icon in _TABS:
+            button = Gtk.ToggleButton()
+            button.set_child(Adw.ButtonContent(icon_name=icon, label=title))
+            button.set_hexpand(True)
+
+            if first_button is None:
+                first_button = button
+            else:
+                button.set_group(first_button)
+
+            button.set_active(name == _TABS[0][0])
+            button.connect("toggled", self._on_tab_toggled, name)
+            tabs.append(button)
+
+        self.append(tabs)
+        self.append(self.stack)
         # ``on_rescan(done)`` starts a library scan and calls ``done()`` once
         # it is over. It returns False when it could not start one.
         self._on_rescan = on_rescan
@@ -34,6 +95,35 @@ class PreferencesView(Adw.PreferencesPage):
         self._create_import_group()
         self._create_compilations_group()
         self._create_playback_group()
+
+        if equalizer is not None:
+            self._create_equalizer_groups(equalizer, available, analyse)
+
+    def release(self):
+        """Stop the equalizer's controls following the equalizer: the
+        preferences are being closed."""
+        if self.equalizer_controls is not None:
+            self.equalizer_controls.release()
+
+        if self.replaygain_controls is not None:
+            self.replaygain_controls.release()
+
+    def _create_equalizer_groups(self, equalizer, available, analyse):
+        """The equalizer and ReplayGain, with the same controls as the equalizer
+        window: they show and change the same settings."""
+        group = Adw.PreferencesGroup()
+        self.equalizer_controls = EqualizerControls(equalizer, available)
+        group.add(self.equalizer_controls)
+        self._pages["playback"].add(group)
+
+        group = Adw.PreferencesGroup()
+        self.replaygain_controls = ReplayGainControls(equalizer, analyse)
+        group.add(self.replaygain_controls)
+        self._pages["playback"].add(group)
+
+    def _on_tab_toggled(self, button, name):
+        if button.get_active():
+            self.stack.set_visible_child_name(name)
 
     def _create_playback_group(self):
         group = Adw.PreferencesGroup(
@@ -77,7 +167,7 @@ class PreferencesView(Adw.PreferencesPage):
         )
         group.add(self.crossfade_seconds_row)
 
-        self.add(group)
+        self._pages["playback"].add(group)
         self._sync_playback_rows()
 
     def _sync_playback_rows(self):
@@ -145,7 +235,7 @@ class PreferencesView(Adw.PreferencesPage):
         )
         group.add(self.auto_scan_row)
 
-        self.add(group)
+        self._pages["library"].add(group)
 
     def _create_organization_group(self):
         group = Adw.PreferencesGroup(
@@ -168,7 +258,7 @@ class PreferencesView(Adw.PreferencesPage):
         )
         group.add(self.organize_files)
 
-        self.add(group)
+        self._pages["library"].add(group)
 
     def _create_import_group(self):
         group = Adw.PreferencesGroup(
@@ -196,7 +286,7 @@ class PreferencesView(Adw.PreferencesPage):
         )
         group.add(self.import_format_row)
 
-        self.add(group)
+        self._pages["import"].add(group)
 
     def _sync_import_format_subtitle(self):
         chosen = import_format(self.settings.import_format)
@@ -264,7 +354,7 @@ class PreferencesView(Adw.PreferencesPage):
         )
         group.add(self.in_albums_row)
 
-        self.add(group)
+        self._pages["compilations"].add(group)
         self._sync_compilation_rows()
 
     def _on_rescan_clicked(self, button):
@@ -439,21 +529,42 @@ def show_preferences_dialog(
         settings,
         on_rescan=None,
         on_change_folder=None,
+        equalizer=None,
+        available=True,
+        analyse=None,
 ):
-    """Open the preferences in a window of their own, over ``parent``."""
+    """Open the preferences in a window of their own, over ``parent``.
+
+    With ``equalizer`` the Playback tab has the equalizer and ReplayGain
+    controls (see ``PreferencesView``).
+    """
     window = Adw.Window()
     window.set_transient_for(parent)
     window.set_modal(True)
     window.set_title("Preferences")
     # Fixed size: the preferences scroll inside it.
     window.set_resizable(False)
-    window.set_size_request(540, 600)
-    window.set_default_size(540, 600)
+    window.set_size_request(640, 640)
+    window.set_default_size(640, 640)
 
     toolbar = Adw.ToolbarView()
     toolbar.add_top_bar(Adw.HeaderBar())
-    toolbar.set_content(PreferencesView(settings, on_rescan, on_change_folder))
+    view = PreferencesView(
+        settings,
+        on_rescan,
+        on_change_folder,
+        equalizer,
+        available,
+        analyse,
+    )
+    toolbar.set_content(view)
     window.set_content(toolbar)
+
+    def on_close_request(_window):
+        view.release()
+        return False
+
+    window.connect("close-request", on_close_request)
 
     keys = Gtk.EventControllerKey()
 

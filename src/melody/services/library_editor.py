@@ -824,6 +824,19 @@ class LibraryEditor:
 
         return self._embed_cover([track], data)
 
+    def set_tracks_image(self, track_ids, data: bytes) -> dict:
+        """Embed ``data`` as the cover of several tracks' files, at once."""
+        tracks = [
+            track
+            for track in (self.database.get_track(track_id) for track_id in track_ids)
+            if track is not None
+        ]
+
+        if not tracks:
+            raise LibraryEditError("The selected tracks no longer exist")
+
+        return self._embed_cover(tracks, data)
+
     def set_album_image(
             self,
             album_artist: str,

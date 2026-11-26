@@ -1,11 +1,15 @@
 """The Playing queue page: the tracks that are playing now and the ones that
 will play after, in the order of the queue.
 
-A double click plays a track of the queue from there, and its right-click
-menu can play it, move it to right after the current track, or take it out of
-the queue. The track being played is marked with a play (or pause) icon where
-the cover would be, and cannot be removed. "Clear" empties the queue of
-everything after it.
+Several tracks can be selected, with the same keys as in the other lists
+(Ctrl+click, Shift+click, Ctrl+A). A double click plays a track of the queue
+from there. The right-click menu acts on the selection: it can play the first
+selected track, move the selected ones to right after the current track, take
+them out of the queue, and do what the other lists do with tracks (playlists,
+favorites, album, artist, artwork, deletion).
+
+The track being played is highlighted, like in the other lists, and cannot be
+removed. "Clear" empties the queue of everything after it.
 
 The queue only means something while a track is loaded (with nothing playing
 it is just the whole library), so the page says "Nothing is playing" then.
@@ -25,6 +29,8 @@ from gi.repository import Adw, GLib, Gtk
 from melody.layout import PAGE_MARGIN
 from melody.services.collection_actions import (
     attach_context_menu,
+    delete_tracks,
+    run_tracks_action,
     scroll_to_row,
 )
 from melody.widgets.track_table import (
@@ -43,12 +49,9 @@ class QueueView(Gtk.Box):
 
         self._title = "Playing queue"
         self.playback_manager = playback_manager
-        # What the list was last built from, and the playback state its
-        # "now playing" icon shows.
+        # What the list was last built from.
         self._signature = None
-        self._state = None
         self._shown_track = None
-        self._now_icon = None
 
         self._build_header()
         self._build_list()
@@ -109,7 +112,8 @@ class QueueView(Gtk.Box):
 
     def _build_list(self):
         self.list = Gtk.ListBox()
-        self.list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        # Several tracks can be selected, as in the other lists.
+        self.list.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.list.set_activate_on_single_click(False)
         self.list.add_css_class("boxed-list")
         self.list.connect("row-activated", self._on_row_activated)
@@ -144,23 +148,24 @@ class QueueView(Gtk.Box):
         manager = self.playback_manager
 
         if self.get_mapped():
-            signature = (
-                manager.queue_version,
-                manager.current_index,
-                id(manager.current_track),
-            )
+            signature = self._current_signature()
 
             if signature != self._signature:
                 self._signature = signature
                 self._rebuild()
 
-            if manager.state != self._state:
-                self._state = manager.state
-                self._update_now_icon()
-
             self._update_controls()
 
         return GLib.SOURCE_CONTINUE
+
+    def _current_signature(self):
+        manager = self.playback_manager
+
+        return (
+            manager.queue_version,
+            manager.current_index,
+            id(manager.current_track),
+        )
 
     def _is_loaded(self):
         manager = self.playback_manager
@@ -180,23 +185,15 @@ class QueueView(Gtk.Box):
         self.clear_button.set_sensitive(upcoming > 0)
         self.hint.set_visible(bool(manager.shuffle) and self._is_loaded())
 
-    def _update_now_icon(self):
-        if self._now_icon is None:
-            return
-
-        self._now_icon.set_from_icon_name(
-            "media-playback-start-symbolic"
-            if self.playback_manager.state == "playing"
-            else "media-playback-pause-symbolic"
-        )
-        self._now_icon.set_pixel_size(16)
-
     def _rebuild(self):
         manager = self.playback_manager
 
         # Where the list was, to put it back after the rows are made again.
         adjustment = self.scrolled.get_vadjustment()
         position = adjustment.get_value()
+
+        # The selection is kept too, by queue position.
+        selected = {row.queue_index for row in self.list.get_selected_rows()}
 
         child = self.list.get_first_child()
 
@@ -205,8 +202,6 @@ class QueueView(Gtk.Box):
             self.list.remove(child)
             child = next_child
 
-        self._now_icon = None
-
         if not self._is_loaded():
             self._shown_track = None
             self.count_label.set_text("")
@@ -214,24 +209,25 @@ class QueueView(Gtk.Box):
             return
 
         current_row = None
+        rows = {}
 
         for index, track in enumerate(manager.queue):
-            row = self._create_row(
-                index,
-                track,
-                index == manager.current_index,
-            )
+            row = self._create_row(index, track)
             self.list.append(row)
+            rows[index] = row
 
             if index == manager.current_index:
                 current_row = row
+
+        for index in selected:
+            if index in rows:
+                self.list.select_row(rows[index])
 
         upcoming = len(manager.queue) - manager.current_index - 1
         self.count_label.set_text(
             f"{upcoming} up next" if upcoming else "Nothing up next"
         )
         self.stack.set_visible_child_name("queue")
-        self._update_now_icon()
 
         if self._shown_track != id(manager.current_track):
             # Another track is playing: show it.
@@ -245,21 +241,16 @@ class QueueView(Gtk.Box):
 
             GLib.timeout_add(60, restore)
 
-    def _create_row(self, index, track, is_current):
+    def _create_row(self, index, track):
         artwork = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
         artwork.set_pixel_size(round(THUMBNAIL_SIZE * 0.7))
         artwork.set_size_request(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
 
-        if is_current:
-            # The track being played shows what it is doing instead of its
-            # cover (see ``_update_now_icon``).
-            self._now_icon = artwork
-        else:
-            artwork_path = track.get("artwork_path")
+        artwork_path = track.get("artwork_path")
 
-            if artwork_path and Path(artwork_path).is_file():
-                artwork.set_from_file(artwork_path)
-                artwork.set_pixel_size(THUMBNAIL_SIZE)
+        if artwork_path and Path(artwork_path).is_file():
+            artwork.set_from_file(artwork_path)
+            artwork.set_pixel_size(THUMBNAIL_SIZE)
 
         row = create_track_row(
             track,
@@ -269,31 +260,94 @@ class QueueView(Gtk.Box):
         )
         row.queue_index = index
 
-        attach_context_menu(row, lambda row=row: self._menu_entries(row))
+        attach_context_menu(
+            row,
+            lambda row=row: self._menu_entries(row),
+            keep_selection=True,
+        )
         return row
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
+    def _selection_for_menu(self, row):
+        """The rows the menu of ``row`` acts on, in queue order. A row that is
+        part of the selection keeps the selection; any other row is selected
+        on its own first (as in the other lists)."""
+        if not row.is_selected():
+            self.list.unselect_all()
+            self.list.select_row(row)
+
+        return sorted(
+            self.list.get_selected_rows(),
+            key=lambda selected: selected.queue_index,
+        )
+
     def _menu_entries(self, row):
         manager = self.playback_manager
-        index = row.queue_index
+        rows = self._selection_for_menu(row)
+        indexes = [selected.queue_index for selected in rows]
+        tracks = [manager.queue[index] for index in indexes]
+        current = manager.current_index
+        upcoming = [index for index in indexes if index != current]
 
-        # Right-clicking a track selects it, like in the other lists.
-        self.list.select_row(row)
+        entries = [("Play", lambda: manager.play_index(indexes[0]))]
 
-        entries = [("Play", lambda: manager.play_index(index))]
-
-        if index != manager.current_index:
+        # The track being played stays where it is: only the others move or
+        # leave the queue.
+        if upcoming:
             entries.append(
-                ("Play next", lambda: manager.play_queued_next(index))
+                ("Play next", lambda: self._move_next(upcoming))
             )
             entries.append(
-                ("Remove from queue", lambda: manager.remove_from_queue(index))
+                ("Remove from queue", lambda: self._remove(upcoming))
             )
+
+        entries.append(None)
+        entries.append((
+            "Add to playlist\u2026",
+            lambda: run_tracks_action("add_to_playlist", tracks),
+        ))
+        entries.append((
+            "Remove from favorites"
+            if all(track.get("favorite") for track in tracks)
+            else "Add to favorites",
+            lambda: run_tracks_action("favorite", tracks),
+        ))
+        entries.append((
+            "Set album\u2026",
+            lambda: run_tracks_action("set_album", tracks),
+        ))
+        entries.append((
+            "Set artist\u2026",
+            lambda: run_tracks_action("set_artist", tracks),
+        ))
+        entries.append((
+            "Set artwork\u2026",
+            lambda: run_tracks_action("set_artwork", tracks),
+        ))
+        entries.append(None)
+        entries.append(("Delete", lambda: delete_tracks(tracks)))
 
         return entries
+
+    def _move_next(self, indexes):
+        # The positions change: the selection would point at other tracks.
+        self.list.unselect_all()
+        self.playback_manager.play_queued_many_next(indexes)
+        self._refresh_now()
+
+    def _remove(self, indexes):
+        self.list.unselect_all()
+        self.playback_manager.remove_many_from_queue(indexes)
+        self._refresh_now()
+
+    def _refresh_now(self):
+        """Build the list again at once, rather than on the next poll: the rows
+        of the old queue must be gone before the menu's selection is restored."""
+        self._signature = self._current_signature()
+        self._rebuild()
 
     def _on_row_activated(self, list_box, row):
         self.playback_manager.play_index(row.queue_index)

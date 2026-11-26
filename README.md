@@ -26,7 +26,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Covers and images** can be changed for tracks, albums, artists and playlists, by choosing an image file or by searching YouTube. Above the search, a row of suggestions from other sites: Deezer, iTunes and the Cover Art Archive for albums (and for the album of a track), Deezer, Wikimedia and Fanart.tv for artists. A track's search looks for its music video ("title artist") and its edit window can also reuse the album's cover; an album's looks for covers on YouTube Music; an artist's shows the pictures of the YouTube channels found for their name; a playlist's is a plain video search. The thumbnails are cropped to a square.
 - **Start and end times:** a track can be trimmed to a section of its file.
 - **Delete:** the right-click menu on a track can delete it. The file is moved to the trash and the track leaves the library and its playlists.
-- **Multi-track select:** in every list of tracks, click selects a track, Ctrl+click adds or removes one, Shift+click selects a range and Ctrl+A selects the whole list. Right-clicking the selection opens a menu to play it, play it after the current track, add it to the queue, set the album or the artist of all the tracks at once, add them to a playlist, mark them as favorites, remove them from the playlist or delete them.
+- **Multi-track select:** in every list of tracks, click selects a track, Ctrl+click adds or removes one, Shift+click selects a range and Ctrl+A selects the whole list. Right-clicking the selection opens a menu to play it, play it after the current track, add it to the queue, set the album, the artist or the artwork of all the tracks at once, add them to a playlist, mark them as favorites, remove them from the playlist or delete them.
 
 ### Importing music
 
@@ -45,7 +45,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **Equalizer:** a window with an on and off switch, ten bands from 30 Hz to 15 kHz that can each be boosted or cut by up to 12 dB, and ten presets (Flat, Bass boost, Bass reduce, Treble boost, Vocal, Rock, Pop, Jazz, Classical and Electronic). The settings are kept between launches and heard at once.
 - **ReplayGain:** a switch in the equalizer window plays each track with its ReplayGain tag, so tracks recorded at different levels sound equally loud. The edit window shows the tag of a track (MP3, FLAC, Ogg Vorbis and M4A files can hold one) and lets you change it or measure the file's loudness to write one.
 - **Currently playing page:** under Search in the sidebar, it shows the track being played large, with its cover, title, artist and album (both open their pages), duration and play count, the previous, play or pause and next controls, and buttons to favorite, add to a playlist or edit it.
-- **Playing queue page:** under Search in the sidebar, it lists the track being played and everything after it. Double-click a track to play from there, right-click to play it, move it to right after the current track or remove it, and use Clear to empty everything after the current track.
+- **Playing queue page:** under Search in the sidebar, it lists the track being played and everything after it. Double-click a track to play from there. Several tracks can be selected, as in the other lists, and the right-click menu acts on the selection: play it, move the selected tracks to right after the current track, remove them from the queue, or do what the other lists do with tracks (playlists, favorites, album, artist, artwork, deletion). Use Clear to empty everything after the current track.
 - **Resume on start:** when Melody closes, it remembers the page shown, the playing queue and the position in the track being played. The next start opens the same page and loads that track paused at the same place, so Play carries on from there. Tracks removed from the library in the meantime are left out of the queue.
 - **Gapless playback and crossfade:** in Preferences, under Playback. Gapless playback hands a track over to the next one with no pause, which suits albums meant to run together. Crossfade fades the end of a track into the start of the next one, over 1 to 12 seconds. Crossfade takes priority over gapless playback, and neither applies to a track with a custom start or end time, which changes normally.
 - Desktop integration through MPRIS: media keys, the shell's media widget and tools such as `playerctl` can show what is playing and control play, pause, next, previous, seek, shuffle, repeat and volume.
@@ -137,6 +137,6 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 - [x] Genres and year (pages, and filters)
 - [ ] Ratings
 - [ ] Background playback (keep playing when the window is closed)
-- [ ] Bulk artwork editing
-- [ ] Multi-select in the Playing queue page
+- [x] Bulk artwork editing
+- [x] Multi-select in the Playing queue page
 - [ ] Listening stats
