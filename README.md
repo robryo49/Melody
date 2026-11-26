@@ -45,6 +45,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 - **ReplayGain:** a switch in the equalizer window plays each track with its ReplayGain tag, so tracks recorded at different levels sound equally loud. The edit window shows the tag of a track (MP3, FLAC, Ogg Vorbis and M4A files can hold one) and lets you change it or measure the file's loudness to write one.
 - **Currently playing page:** under Search in the sidebar, it shows the track being played large, with its cover, title, artist and album (both open their pages), duration and play count, the previous, play or pause and next controls, and buttons to favorite, add to a playlist or edit it.
 - **Playing queue page:** under Search in the sidebar, it lists the track being played and everything after it. Double-click a track to play from there, right-click to play it, move it to right after the current track or remove it, and use Clear to empty everything after the current track.
+- **Resume on start:** when Melody closes, it remembers the page shown, the playing queue and the position in the track being played. The next start opens the same page and loads that track paused at the same place, so Play carries on from there. Tracks removed from the library in the meantime are left out of the queue.
 - Desktop integration through MPRIS: media keys, the shell's media widget and tools such as `playerctl` can show what is playing and control play, pause, next, previous, seek, shuffle, repeat and volume.
 
 ### Keyboard shortcuts
@@ -129,7 +130,7 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 
 ## TODO
 
-- [ ] Resume on start (the queue, the current track and its position)
+- [x] Resume on start (the queue, the current track and its position)
 - [ ] Sleep timer
 - [ ] Gapless playback and crossfade
 - [ ] Genres and year (pages, and filters)

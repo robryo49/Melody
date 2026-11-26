@@ -72,6 +72,7 @@ from melody.views import (
 )
 from melody.services.compilations import is_compilation
 from melody.services.settings import get_settings
+from melody.services.session import load_session, save_session
 from melody.services.equalizer import get_equalizer
 from melody.services.library_search import artist_name
 from melody.services.replaygain_analysis import (
@@ -135,6 +136,10 @@ class MelodyWindow(Adw.ApplicationWindow):
         # Downloads waiting in temporary folders until they have been
         # imported (see ``_discard_downloads``).
         self._downloads = []
+        # The session (the page, the queue and where the track was) is picked
+        # up after the first successful library scan, and only then saved
+        # again when Melody closes (see ``_restore_session``).
+        self._session_restored = False
         self.playback_manager = PlaybackManager()
         self.library_manager = LibraryManager(get_settings().music_folder)
         self.database = self.library_manager.database
@@ -1282,6 +1287,10 @@ class MelodyWindow(Adw.ApplicationWindow):
                 4,
                 self._hide_sync_status,
             )
+
+        if not self._session_restored:
+            self._session_restored = True
+            self._restore_session()
 
         self._finish_sync()
         return GLib.SOURCE_REMOVE
@@ -2842,7 +2851,110 @@ class MelodyWindow(Adw.ApplicationWindow):
         self.sync_status.set_visible(False)
         return GLib.SOURCE_REMOVE
 
+    def _restore_session(self):
+        """Pick up where the last session was left: the page that was shown,
+        and the queue with the track that was playing, loaded and paused at the
+        position it had (Play goes on from there). Tracks no longer in the
+        library are left out of the queue."""
+        session = load_session()
+
+        if not session:
+            return
+
+        page = session.get("page")
+
+        # A page that is gone (a playlist category with no playlist left, or
+        # Compilations once turned off) falls back to the Library.
+        row = self.navigation_rows.get(page)
+
+        if row is None or not row.get_visible():
+            page = "Library"
+
+        library = {track.get("id"): track for track in self.tracks}
+        saved_index = session.get("index", -1)
+        queue = []
+        index = -1
+
+        for slot, track_id in enumerate(session.get("queue") or []):
+            track = library.get(track_id)
+
+            if track is None:
+                continue
+
+            if slot == saved_index:
+                index = len(queue)
+
+            queue.append(track)
+
+        if index >= 0:
+            try:
+                position = float(session.get("position") or 0.0)
+            except (TypeError, ValueError):
+                position = 0.0
+
+            self.playback_manager.resume(
+                queue,
+                index,
+                position=position,
+                source=self._source_from_session(session.get("source")),
+            )
+
+        # The page the session starts on is the first one in the history, so
+        # the back arrow does not lead to the Library page of the launch.
+        self._history = []
+        self._history_index = -1
+        self._select_page(page)
+
+    @staticmethod
+    def _source_from_session(saved):
+        """What the saved queue was started from (see ``playback_source``),
+        read back from the session file."""
+        if not isinstance(saved, dict) or saved.get("kind") is None:
+            return None
+
+        key = saved.get("key")
+
+        # JSON has no tuples: an album's key comes back as a list.
+        if isinstance(key, list):
+            key = tuple(key)
+
+        return {
+            "kind": saved["kind"],
+            "key": key,
+            "ids": frozenset(saved.get("ids") or []),
+        }
+
+    def _save_session(self):
+        """Keep the page shown, the queue and the position in the track being
+        played, for the next start (see ``_restore_session``)."""
+        manager = self.playback_manager
+        loaded = manager.current_track is not None
+        source = manager.source
+        saved_source = None
+
+        if source is not None:
+            key = source["key"]
+            saved_source = {
+                "kind": source["kind"],
+                "key": list(key) if isinstance(key, tuple) else key,
+                "ids": list(source["ids"]),
+            }
+
+        save_session({
+            "page": self._current_page,
+            "queue": [track.get("id") for track in manager.queue],
+            "index": manager.current_index if loaded else -1,
+            "position": manager.get_resume_position() if loaded else 0.0,
+            "source": saved_source,
+        })
+
     def _on_close_request(self, window):
+        # What is on screen and playing is picked up on the next start. Not
+        # saved before the library has been restored: the session on disk is
+        # then still the one to keep.
+        if self._session_restored:
+            self._save_session()
+
         # A slider moved a moment ago may not have been saved yet.
         self.equalizer.flush()
         self.library_watcher.stop()

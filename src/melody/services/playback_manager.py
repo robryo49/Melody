@@ -61,6 +61,9 @@ class PlaybackManager:
 
         # Where to seek to once the pipeline is ready (see _load_current_track).
         self._pending_seek = None
+        # Whether the track starts playing once it is ready, or stays paused
+        # (when it was resumed from an earlier session, see ``resume``).
+        self._play_when_ready = True
 
         self.repeat_mode = "off"
         self.shuffle = False
@@ -474,7 +477,7 @@ class PlaybackManager:
     def toggle_shuffle(self):
         self.set_shuffle(not self.shuffle)
 
-    def _load_current_track(self):
+    def _load_current_track(self, resume_at=None):
         if not 0 <= self.current_index < len(self.queue):
             self.stop()
             return
@@ -505,18 +508,26 @@ class PlaybackManager:
         if self.on_track_changed:
             self.on_track_changed(track)
 
-        self._set_state("playing")
+        self._set_state("paused" if resume_at is not None else "playing")
 
         start, end = self._track_range(track)
 
-        if start > 0 or end is not None:
+        if resume_at is not None:
+            # Back from an earlier session: loaded at its position and kept
+            # paused, so it only plays when the person presses play.
+            self._pending_seek = max(0.0, float(resume_at))
+            self._play_when_ready = False
+            self.player.set_state(Gst.State.PAUSED)
+        elif start > 0 or end is not None:
             # A track with a custom start and/or end: it can only be seeked
             # once the pipeline is ready, so go to PAUSED first. The seek (and
             # then playing) happens in the bus handler, on ASYNC_DONE.
             self._pending_seek = start
+            self._play_when_ready = True
             self.player.set_state(Gst.State.PAUSED)
         else:
             self._pending_seek = None
+            self._play_when_ready = True
             self.player.set_state(Gst.State.PLAYING)
 
     @staticmethod
@@ -542,6 +553,25 @@ class PlaybackManager:
             # sets the new stop position.
             self.seek(self.get_position())
 
+    def resume(self, tracks, index, position=0.0, source=None):
+        """Put back the queue of an earlier session: ``tracks``, with the one at
+        ``index`` loaded at ``position`` (seconds into its file) and paused.
+        Play goes on from there."""
+        self.queue = list(tracks)
+        self.queue_version += 1
+        self.source = source
+        self.current_index = index
+        self._reset_shuffle(index)
+        self._load_current_track(resume_at=position)
+
+    def get_resume_position(self):
+        """Where the track being played is, for the next start: the position it
+        is waiting to start from while the pipeline is not ready yet."""
+        if self._pending_seek is not None:
+            return self._pending_seek
+
+        return self.get_position()
+
     def play(self):
         if self.current_track is None:
             if self.queue:
@@ -550,6 +580,9 @@ class PlaybackManager:
                 self._load_current_track()
             return
 
+        # Playing again: a track still waiting for its start position plays
+        # as soon as it is ready.
+        self._play_when_ready = True
         self.player.set_state(Gst.State.PLAYING)
         self._set_state("playing")
 
@@ -557,6 +590,7 @@ class PlaybackManager:
         if self.current_track is None:
             return
 
+        self._play_when_ready = False
         self.player.set_state(Gst.State.PAUSED)
         self._set_state("paused")
 
@@ -768,8 +802,12 @@ class PlaybackManager:
                 position = self._pending_seek
                 self._pending_seek = None
                 self._seek_range(position)
-                self.player.set_state(Gst.State.PLAYING)
-                self._set_state("playing")
+
+                if self._play_when_ready:
+                    self.player.set_state(Gst.State.PLAYING)
+                    self._set_state("playing")
+                else:
+                    self._set_state("paused")
 
         elif message.type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.player:
