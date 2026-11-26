@@ -3,6 +3,8 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 
+from melody.services.genres import join_genres, split_genres
+
 
 class MetadataError(Exception):
     pass
@@ -16,6 +18,7 @@ class TrackMetadata:
     album_artist: str
     duration: float
     year: str
+    # The track's genres, joined (see ``melody.services.genres``).
     genre: str
 
 
@@ -31,6 +34,26 @@ def _get_tag(tags, key: str, default: str = "") -> str:
         value = value[0] if value else default
 
     return str(value).strip() if value is not None else default
+
+
+def _get_tags(tags, key: str) -> list[str]:
+    """Every value of a tag that can hold several (a track can have several
+    genres)."""
+    if not tags:
+        return []
+
+    value = tags.get(key)
+    if not value:
+        return []
+
+    if not isinstance(value, (list, tuple)):
+        value = [value]
+
+    return [
+        str(item).strip()
+        for item in value
+        if item is not None and str(item).strip()
+    ]
 
 
 def read_metadata(path: Path) -> TrackMetadata:
@@ -63,7 +86,7 @@ def read_metadata(path: Path) -> TrackMetadata:
         album_artist=album_artist,
         duration=float(audio.info.length or 0),
         year=_get_tag(tags, "date"),
-        genre=_get_tag(tags, "genre"),
+        genre=join_genres(split_genres(", ".join(_get_tags(tags, "genre")))),
     )
 
 
@@ -90,8 +113,10 @@ def write_metadata(path: Path, metadata: TrackMetadata):
         "album": metadata.album,
         "albumartist": metadata.album_artist,
         "date": metadata.year,
-        "genre": metadata.genre,
     }
+
+    # Each genre is a tag of its own, not one tag holding them all.
+    genres = split_genres(metadata.genre)
 
     try:
         for key, value in values.items():
@@ -99,6 +124,11 @@ def write_metadata(path: Path, metadata: TrackMetadata):
                 audio[key] = [str(value)]
             else:
                 audio.pop(key, None)
+
+        if genres:
+            audio["genre"] = genres
+        else:
+            audio.pop("genre", None)
 
         audio.save()
     except Exception as error:

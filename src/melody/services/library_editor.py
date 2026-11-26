@@ -333,6 +333,9 @@ class LibraryEditor:
             title: str,
             artist: str,
             album: str,
+            *,
+            year: str | None = None,
+            genre: str | None = None,
     ) -> dict:
         """Edit one track's title (and file name), artist and album.
 
@@ -340,6 +343,9 @@ class LibraryEditor:
         ``<album artist>/<album>/<title>.<ext>``, or to
         ``<album artist>/<title>.<ext>`` when the album is empty (a single).
         The track's album artist is left untouched.
+
+        ``year`` and ``genre`` replace the track's own when given (``None``
+        keeps them; an empty text takes them away).
         """
         title = title.strip()
         artist = artist.strip()
@@ -365,8 +371,8 @@ class LibraryEditor:
                 album=album,
                 album_artist=artist,
                 duration=current["duration"],
-                year=current["year"],
-                genre=current["genre"],
+                year=current["year"] if year is None else year,
+                genre=current["genre"] if genre is None else genre,
             )
 
         try:

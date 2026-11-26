@@ -26,6 +26,7 @@ import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 
+from melody.services.genres import split_genres
 from melody.services.track_range import track_length
 
 # field: (name shown to the person, kind of value). The kind decides which
@@ -314,10 +315,34 @@ def _field_value(track, field):
     return str(track.get(field) or "")
 
 
+def _genre_matches(track, operator, expected):
+    """A track's genres are compared one by one, so "is Rock" finds a track
+    with Rock among several genres."""
+    genres = [
+        _normalize_text(name)
+        for name in split_genres(track.get("genre"))
+    ]
+    wanted = _normalize_text(expected)
+
+    if operator == "contains":
+        return any(wanted in name for name in genres)
+    if operator == "not_contains":
+        return not any(wanted in name for name in genres)
+    if operator == "is":
+        return wanted in genres
+    if operator == "is_not":
+        return wanted not in genres
+
+    return any(name.startswith(wanted) for name in genres)
+
+
 def _matches(track, condition, now):
     field = condition["field"]
     operator = condition["op"]
     expected = condition["value"]
+    if field == "genre":
+        return _genre_matches(track, operator, expected)
+
     kind = FIELDS[field][1]
     actual = _field_value(track, field)
 

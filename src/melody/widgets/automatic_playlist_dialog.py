@@ -24,6 +24,7 @@ from melody.services.automatic_playlists import (
 from melody.services.collection_actions import (
     SuggestionField,
     _close_on_escape,
+    field_caption,
 )
 from melody.services.playlist_categories import category_suggestions
 
@@ -216,8 +217,9 @@ def show_automatic_playlist_dialog(
     name_entry.set_placeholder_text("Playlist name")
     name_entry.set_text(playlist["name"] if editing else "")
 
-    name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-    name_box.append(_caption("Name"))
+    name_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+    name_box.append(field_caption("Name"))
+    name_entry.set_hexpand(True)
     name_box.append(name_entry)
 
     # Category: the page of the sidebar the playlist is listed on. Left

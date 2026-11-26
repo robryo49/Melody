@@ -35,6 +35,10 @@ class PendingTrack:
     # ``_measure_pending``), and changeable in the edit window.
     replaygain: float | None = None
     replaygain_peak: float | None = None
+    # What the edit window shows for them: the year as the file gives it (it
+    # may be a full date), and the genres joined (see services.genres).
+    year: str = ""
+    genre: str = ""
 
     @classmethod
     def from_file(cls, path: Path) -> "PendingTrack":
@@ -49,6 +53,8 @@ class PendingTrack:
             artist=metadata.artist,
             album=metadata.album,
             album_artist=metadata.album_artist,
+            year=metadata.year,
+            genre=metadata.genre,
         )
 
     @classmethod
@@ -72,7 +78,7 @@ class PendingTrack:
         pending.album = download.album or ""
 
         if download.year:
-            pending.metadata.year = download.year
+            pending.year = download.year
 
         pending.image = download.image
         return pending
@@ -99,8 +105,8 @@ class PendingTrack:
             album=self.album,
             album_artist=self.album_artist,
             duration=self.metadata.duration,
-            year=self.metadata.year,
-            genre=self.metadata.genre,
+            year=self.year,
+            genre=self.genre,
         )
 
     def as_track(self) -> dict:
@@ -114,8 +120,8 @@ class PendingTrack:
             "album": self.album,
             "album_artist": self.album_artist,
             "duration": self.metadata.duration,
-            "year": self.metadata.year,
-            "genre": self.metadata.genre,
+            "year": self.year,
+            "genre": self.genre,
             "start_time": self.start_time,
             "end_time": self.end_time,
             "kind": self.kind,
@@ -147,6 +153,12 @@ class PendingTrack:
 
         if "replaygain" in values:
             self.replaygain = values["replaygain"]
+
+        if "year" in values:
+            self.year = values["year"]
+
+        if "genre" in values:
+            self.genre = values["genre"]
 
 
 def load_pending_tracks(paths) -> tuple[list[PendingTrack], list[str]]:

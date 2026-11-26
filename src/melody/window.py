@@ -71,6 +71,7 @@ from melody.views import (
     show_preferences_dialog,
 )
 from melody.services.compilations import is_compilation
+from melody.services.genres import same_genres
 from melody.services.settings import get_settings
 from melody.services.session import load_session, save_session
 from melody.services.equalizer import get_equalizer
@@ -1464,9 +1465,12 @@ class MelodyWindow(Adw.ApplicationWindow):
     def _edit_track(self, track):
         def save(values):
             image = values.get("image")
-            changed = any(
-                values[key].strip() != str(track.get(key) or "").strip()
-                for key in ("title", "artist", "album")
+            changed = (
+                any(
+                    values[key].strip() != str(track.get(key) or "").strip()
+                    for key in ("title", "artist", "album", "year")
+                )
+                or not same_genres(values["genre"], track.get("genre"))
             )
             result = {"moved": 0, "errors": [], "merged": False}
 
@@ -1515,6 +1519,8 @@ class MelodyWindow(Adw.ApplicationWindow):
                         values["title"],
                         values["artist"],
                         values["album"],
+                        year=values["year"].strip(),
+                        genre=values["genre"],
                     )
                 except Exception as error:
                     show_error_dialog(self, "Could not edit track", error)

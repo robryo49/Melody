@@ -21,6 +21,7 @@ Melody is a desktop music player and library manager for Linux, written in Pytho
 ### Editing
 
 - **Tracks, albums, artists and playlists** can be edited from the right-click menu or from their page.
+- **Genre and year:** the edit window of a track has a Genre field, a button that opens the genres of the library, each switched on or off with a click, with a "New genre" option at the bottom, and a Year field (a four-digit year, or a full date as some files hold it). A track can have several genres, each kept as a tag of its own in the file. The genres and years are also tested by automatic playlists.
 - **Renaming moves the files:** the music folder always follows the tags, as `Artist/Album/Title`. Renaming something to a name that already exists offers to merge the two.
 - **Covers and images** can be changed for tracks, albums, artists and playlists, by choosing an image file or by searching YouTube. Above the search, a row of suggestions from other sites: Deezer, iTunes and the Cover Art Archive for albums (and for the album of a track), Deezer, Wikimedia and Fanart.tv for artists. A track's search looks for its music video ("title artist") and its edit window can also reuse the album's cover; an album's looks for covers on YouTube Music; an artist's shows the pictures of the YouTube channels found for their name; a playlist's is a plain video search. The thumbnails are cropped to a square.
 - **Start and end times:** a track can be trimmed to a section of its file.
@@ -132,9 +133,8 @@ Only import audio you have the right to use. YouTube's terms of service do not a
 ## TODO
 
 - [x] Resume on start (the queue, the current track and its position)
-- [ ] Sleep timer
 - [x] Gapless playback and crossfade
-- [ ] Genres and year (pages, and filters)
+- [x] Genres and year (pages, and filters)
 - [ ] Ratings
 - [ ] Background playback (keep playing when the window is closed)
 - [ ] Bulk artwork editing

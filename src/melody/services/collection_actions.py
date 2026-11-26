@@ -1,3 +1,4 @@
+import re
 import threading
 from collections import Counter
 from pathlib import Path
@@ -18,6 +19,7 @@ from melody.services.compilations import (
     is_compilation,
 )
 from melody.services.playlist_categories import category_suggestions
+from melody.services.genres import genre_names, join_genres, split_genres
 from melody.services.settings import get_settings
 from melody.services.replaygain import read_track_gain, supports_replaygain
 from melody.services.singles import has_album
@@ -456,6 +458,30 @@ def _album_suggestions(tracks):
     return suggestions
 
 
+# The names of the fields in the edit windows all share one width (that of
+# the widest), so the fields start at the same place.
+_FIELD_NAMES = Gtk.SizeGroup.new(Gtk.SizeGroupMode.HORIZONTAL)
+
+# The room the status line of a field takes, even when it is empty. Every
+# field gets the same, so the gaps between the fields are all alike.
+FIELD_STATUS_HEIGHT = 18
+
+# How far down the name starts, so that it sits level with the middle of the
+# entry beside it.
+FIELD_NAME_TOP = 8
+
+
+def field_caption(text):
+    """The name of a field, shown to the left of the field in the edit windows."""
+    label = Gtk.Label(label=text, xalign=0)
+    label.add_css_class("heading")
+    # Level with the entry, not with the entry and its status line together.
+    label.set_valign(Gtk.Align.START)
+    label.set_margin_top(FIELD_NAME_TOP)
+    _FIELD_NAMES.add_widget(label)
+    return label
+
+
 class SuggestionField(Gtk.Box):
     """A labelled text field that lists existing values underneath it.
 
@@ -481,7 +507,7 @@ class SuggestionField(Gtk.Box):
             priority=None,
             new_message=None,
     ):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
 
         # What the status line says about a value that does not exist yet
         # (the default speaks of the library).
@@ -498,18 +524,25 @@ class SuggestionField(Gtk.Box):
         self._activate_callbacks = []
         self._picked_callbacks = []
 
-        caption = Gtk.Label(label=label, xalign=0)
-        caption.add_css_class("caption-heading")
-        self.append(caption)
+        caption = field_caption(label)
 
         self.entry = Gtk.Entry()
         self.entry.set_hexpand(True)
         self.entry.set_text(initial)
-        self.append(self.entry)
 
         self.status = Gtk.Label(xalign=0)
         self.status.add_css_class("caption")
-        self.append(self.status)
+        self.status.set_size_request(-1, FIELD_STATUS_HEIGHT)
+
+        # The entry, with the status line under it, is one column beside the
+        # field's name.
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        column.set_hexpand(True)
+        column.append(self.entry)
+        column.append(self.status)
+
+        self.append(caption)
+        self.append(column)
 
         self.listbox = Gtk.ListBox()
         self.listbox.add_css_class("boxed-list")
@@ -813,6 +846,229 @@ class SuggestionField(Gtk.Box):
             self.popover.unparent()
 
 
+_YEAR_PATTERN = re.compile(r"\d{4}(-\d{2}(-\d{2})?)?")
+
+
+def valid_year(text):
+    """A year (``1994``), a full date as some files hold it (``1994-05-01``),
+    or nothing."""
+    return not text or _YEAR_PATTERN.fullmatch(text) is not None
+
+
+class GenrePicker(Gtk.Box):
+    """The "Genre" field of an edit window: a button showing the chosen genres.
+    It opens a list of the genres of the library, each one switched on or off
+    with a click, and a "New genre" entry at the bottom of the list.
+
+    It offers the window what ``SuggestionField`` offers (``get_text``,
+    ``connect_changed``, ``connect_activate``, ``grab_focus``). The text is the
+    chosen genres joined (see ``melody.services.genres``).
+    """
+
+    MAX_LIST_HEIGHT = 260
+
+    def __init__(self, label, initial="", suggestions=()):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+        self._changed_callbacks = []
+        # The genres offered, by their name in lower case.
+        self._checks = {}
+        self._loading = False
+
+        caption = field_caption(label)
+        self.append(caption)
+
+        self._value = Gtk.Label(xalign=0)
+        self._value.set_hexpand(True)
+        self._value.set_ellipsize(Pango.EllipsizeMode.END)
+        self._value.set_max_width_chars(1)
+
+        button_content = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        button_content.append(self._value)
+        button_content.append(
+            Gtk.Image.new_from_icon_name("pan-down-symbolic")
+        )
+
+        self.button = Gtk.MenuButton()
+        self.button.set_child(button_content)
+        self.button.set_hexpand(True)
+
+        # The room a status line takes under the other fields, so this field is
+        # as tall as they are.
+        spacer = Gtk.Box()
+        spacer.set_size_request(-1, FIELD_STATUS_HEIGHT)
+
+        button_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        button_column.set_hexpand(True)
+        button_column.append(self.button)
+        button_column.append(spacer)
+        self.append(button_column)
+
+        self._empty = Gtk.Label(label="No genres yet.", xalign=0)
+        self._empty.add_css_class("dim-label")
+
+        self._list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        self._scrolled = Gtk.ScrolledWindow()
+        self._scrolled.set_policy(
+            Gtk.PolicyType.NEVER,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+        self._scrolled.set_propagate_natural_height(True)
+        self._scrolled.set_max_content_height(self.MAX_LIST_HEIGHT)
+        self._scrolled.set_child(self._list)
+
+        new_button = Gtk.Button()
+        new_button.set_child(Adw.ButtonContent(
+            icon_name="list-add-symbolic",
+            label="New genre…",
+        ))
+        new_button.add_css_class("flat")
+        new_button.set_halign(Gtk.Align.START)
+
+        self._new_entry = Gtk.Entry()
+        self._new_entry.set_placeholder_text("Genre name")
+        self._new_entry.set_hexpand(True)
+
+        add_button = Gtk.Button(label="Add")
+        add_button.add_css_class("suggested-action")
+
+        self._new_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=6,
+        )
+        self._new_row.append(self._new_entry)
+        self._new_row.append(add_button)
+        self._new_row.set_visible(False)
+
+        def show_new_row(_button):
+            self._new_row.set_visible(True)
+            self._new_entry.grab_focus()
+
+        new_button.connect("clicked", show_new_row)
+        self._new_entry.connect("activate", self._on_create)
+        add_button.connect("clicked", self._on_create)
+
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        menu.set_margin_top(12)
+        menu.set_margin_bottom(12)
+        menu.set_margin_start(12)
+        menu.set_margin_end(12)
+        menu.set_size_request(260, -1)
+        menu.append(self._empty)
+        menu.append(self._scrolled)
+        menu.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        menu.append(new_button)
+        menu.append(self._new_row)
+
+        popover = Gtk.Popover()
+        popover.set_child(menu)
+        self.button.set_popover(popover)
+
+        for name in suggestions:
+            self._set_option(name, False)
+
+        for name in split_genres(initial):
+            self._set_option(name, True)
+
+        self._refresh()
+
+    # -- the list --------------------------------------------------------
+
+    def _set_option(self, name, checked):
+        """Offer ``name`` (if it is not already), switched on or off."""
+        key = name.casefold()
+        check = self._checks.get(key)
+
+        if check is None:
+            check = Gtk.CheckButton(label=name)
+            check.connect("toggled", self._on_toggled)
+            self._checks[key] = check
+            self._sort_list()
+
+        if check.get_active() != checked:
+            self._loading = True
+            try:
+                check.set_active(checked)
+            finally:
+                self._loading = False
+
+    def _sort_list(self):
+        """Lay the genres out A-Z."""
+        child = self._list.get_first_child()
+
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self._list.remove(child)
+            child = next_child
+
+        for key in sorted(self._checks):
+            self._list.append(self._checks[key])
+
+    def _refresh(self):
+        names = self.selected_names()
+        self._value.set_label(join_genres(names) or "None")
+
+        if names:
+            self._value.remove_css_class("dim-label")
+        else:
+            self._value.add_css_class("dim-label")
+
+        self._empty.set_visible(not self._checks)
+        self._scrolled.set_visible(bool(self._checks))
+
+    def _changed(self):
+        self._refresh()
+
+        for callback in self._changed_callbacks:
+            callback()
+
+    def _on_toggled(self, _check):
+        if not self._loading:
+            self._changed()
+
+    def _on_create(self, *_args):
+        """Add the genre typed in the entry, switched on (an existing one is
+        just switched on)."""
+        text = self._new_entry.get_text()
+
+        for name in split_genres(text):
+            self._set_option(name, True)
+
+        if not split_genres(text):
+            return
+
+        self._new_entry.set_text("")
+        self._new_row.set_visible(False)
+        self._changed()
+
+    # -- what the edit window uses ---------------------------------------
+
+    def selected_names(self):
+        """The genres switched on, A-Z."""
+        return [
+            check.get_label()
+            for key, check in sorted(self._checks.items())
+            if check.get_active()
+        ]
+
+    def get_text(self):
+        return join_genres(self.selected_names())
+
+    def connect_changed(self, callback):
+        self._changed_callbacks.append(callback)
+
+    def connect_activate(self, callback):
+        """Accepted for the window's sake. Enter in the new-genre entry only
+        adds the genre: it does not save the window."""
+
+    def grab_focus(self, show_suggestions=True):
+        return self.button.grab_focus()
+
+
 def show_edit_dialog(
         parent,
         window_title,
@@ -929,13 +1185,13 @@ def show_edit_dialog(
 
     cover_size = 220
     GAP = 24
-    FORM_WIDTH = 380
+    FORM_WIDTH = 400
     # Room for the fields and the hint. The suggestion dropdown floats over
     # the form, so it needs no room of its own. (What goes under the cover,
     # on the left, makes that column taller instead.)
     FORM_HEIGHT = max(
         cover_size,
-        len(specs) * 86 - 16
+        len(specs) * 70 - 16
         + (60 if replaygain_spec else 0)
         + (60 if hint else 0),
     )
@@ -1056,9 +1312,10 @@ def show_edit_dialog(
     # artwork" do anything, and only when the window is saved, like the rest.
     cover_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
     cover_column.set_halign(Gtk.Align.START)
-    # As tall as the form beside it: what is under the cover (play count,
-    # "Compilation") shares the room left under it evenly.
-    cover_column.set_valign(Gtk.Align.FILL)
+    # Stacked from the top: the artwork, then what is under it (the apply
+    # button, the ReplayGain note, the Compilation checkbox), each one gap
+    # below the last.
+    cover_column.set_valign(Gtk.Align.START)
     cover_column.append(cover_overlay)
 
     apply_button = None
@@ -1079,14 +1336,21 @@ def show_edit_dialog(
             (lambda key=priority_key: fields[key].get_text().casefold())
             if priority_key else None
         )
-        fields[spec["key"]] = SuggestionField(
-            spec["label"],
-            noun=spec.get("noun"),
-            suggestions=spec.get("suggestions", ()),
-            initial=original[spec["key"]],
-            priority=priority,
-            new_message=spec.get("new_message"),
-        )
+        if spec.get("picker") == "genres":
+            fields[spec["key"]] = GenrePicker(
+                spec["label"],
+                initial=original[spec["key"]],
+                suggestions=spec.get("suggestions", ()),
+            )
+        else:
+            fields[spec["key"]] = SuggestionField(
+                spec["label"],
+                noun=spec.get("noun"),
+                suggestions=spec.get("suggestions", ()),
+                initial=original[spec["key"]],
+                priority=priority,
+                new_message=spec.get("new_message"),
+            )
 
         if spec.get("placeholder"):
             fields[spec["key"]].entry.set_placeholder_text(spec["placeholder"])
@@ -1131,10 +1395,6 @@ def show_edit_dialog(
         # Wrap to the column, never widen it.
         line.set_max_width_chars(1)
         line.add_css_class("dim-label")
-        # Each line takes an equal share of the room under the cover, and sits
-        # in the middle of it.
-        line.set_vexpand(True)
-        line.set_valign(Gtk.Align.CENTER)
         cover_column.append(line)
 
     if hint:
@@ -1198,9 +1458,6 @@ def show_edit_dialog(
         compilation_check.set_active(compilation_initial)
         compilation_check.set_halign(Gtk.Align.START)
         compilation_check.set_tooltip_text(compilation_spec.get("tooltip"))
-        # Under the cover, below the play count, sharing the room evenly.
-        compilation_check.set_vexpand(True)
-        compilation_check.set_valign(Gtk.Align.CENTER)
         cover_column.append(compilation_check)
 
     def compilation_changed():
@@ -1441,6 +1698,23 @@ def show_edit_track_dialog(
             "optional": True,
             "on_pick": on_album_picked,
         },
+        {
+            "key": "genre",
+            "label": "Genre",
+            "initial": track.get("genre"),
+            # A list of the genres in the library, each switched on or off.
+            "picker": "genres",
+            "suggestions": genre_names(library_tracks),
+            "optional": True,
+        },
+        {
+            "key": "year",
+            "label": "Year",
+            "initial": track.get("year"),
+            "placeholder": "e.g. 1994",
+            "optional": True,
+            "validate": valid_year,
+        },
     ]
 
     # The track's ReplayGain tag, when ReplayGain is switched on.
@@ -1499,15 +1773,10 @@ def show_edit_track_dialog(
             ),
         }
 
-    # How many times the track was played: shown for information only (a
-    # track being imported has no count yet).
     info = None
 
-    if track.get("play_count") is not None:
-        info = [("Play count", str(int(track["play_count"])))]
-
     if replaygain_unsupported:
-        info = list(info or ()) + [
+        info = [
             ("ReplayGain", "Not available for this type of file"),
         ]
 
@@ -1751,7 +2020,7 @@ def _show_tracks_dialog(parent, window_title, description, specs, callback):
     note.add_css_class("caption")
 
     content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    content.set_size_request(380, -1)
+    content.set_size_request(400, -1)
     content.set_margin_top(24)
     content.set_margin_bottom(24)
     content.set_margin_start(24)
