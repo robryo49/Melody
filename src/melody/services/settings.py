@@ -30,6 +30,12 @@ DEFAULTS = {
     # The audio format a download (YouTube) is saved as: a key of
     # ``import_formats.IMPORT_FORMATS``.
     "import_format": "mp3",
+    # Hand a track over to the next one without a pause (see
+    # PlaybackManager.set_transitions). Not used while crossfade is on.
+    "gapless_enabled": True,
+    # Fade the end of a track into the next one, over crossfade_seconds.
+    "crossfade_enabled": False,
+    "crossfade_seconds": 4.0,
 }
 
 
@@ -225,6 +231,30 @@ class Settings:
     @import_format.setter
     def import_format(self, value):
         self.set("import_format", value)
+
+    @property
+    def gapless_enabled(self) -> bool:
+        return self._values["gapless_enabled"]
+
+    @gapless_enabled.setter
+    def gapless_enabled(self, value):
+        self.set("gapless_enabled", value)
+
+    @property
+    def crossfade_enabled(self) -> bool:
+        return self._values["crossfade_enabled"]
+
+    @crossfade_enabled.setter
+    def crossfade_enabled(self, value):
+        self.set("crossfade_enabled", value)
+
+    @property
+    def crossfade_seconds(self) -> float:
+        return self._values["crossfade_seconds"]
+
+    @crossfade_seconds.setter
+    def crossfade_seconds(self, value):
+        self.set("crossfade_seconds", value)
 
     @property
     def music_folder(self) -> Path:

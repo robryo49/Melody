@@ -33,6 +33,67 @@ class PreferencesView(Adw.PreferencesPage):
         self._create_organization_group()
         self._create_import_group()
         self._create_compilations_group()
+        self._create_playback_group()
+
+    def _create_playback_group(self):
+        group = Adw.PreferencesGroup(
+            title="Playback",
+            description="How one track follows the next.",
+        )
+
+        self.gapless_row = Adw.SwitchRow(
+            title="Gapless playback",
+            subtitle=(
+                "No pause between two tracks, for albums meant to run "
+                "together. Not used while crossfade is on."
+            ),
+        )
+        self.gapless_row.set_active(self.settings.gapless_enabled)
+        self.gapless_row.connect(
+            "notify::active",
+            self._on_gapless_toggled,
+        )
+        group.add(self.gapless_row)
+
+        self.crossfade_row = Adw.SwitchRow(
+            title="Crossfade",
+            subtitle="The end of a track fades into the start of the next one.",
+        )
+        self.crossfade_row.set_active(self.settings.crossfade_enabled)
+        self.crossfade_row.connect(
+            "notify::active",
+            self._on_crossfade_toggled,
+        )
+        group.add(self.crossfade_row)
+
+        self.crossfade_seconds_row = Adw.SpinRow.new_with_range(1, 12, 1)
+        self.crossfade_seconds_row.set_title("Crossfade duration")
+        self.crossfade_seconds_row.set_subtitle("In seconds.")
+        self.crossfade_seconds_row.set_digits(0)
+        self.crossfade_seconds_row.set_value(self.settings.crossfade_seconds)
+        self.crossfade_seconds_row.connect(
+            "notify::value",
+            self._on_crossfade_seconds_changed,
+        )
+        group.add(self.crossfade_seconds_row)
+
+        self.add(group)
+        self._sync_playback_rows()
+
+    def _sync_playback_rows(self):
+        crossfade = self.settings.crossfade_enabled
+        self.gapless_row.set_sensitive(not crossfade)
+        self.crossfade_seconds_row.set_sensitive(crossfade)
+
+    def _on_gapless_toggled(self, row, _pspec):
+        self.settings.gapless_enabled = row.get_active()
+
+    def _on_crossfade_toggled(self, row, _pspec):
+        self.settings.crossfade_enabled = row.get_active()
+        self._sync_playback_rows()
+
+    def _on_crossfade_seconds_changed(self, row, _pspec):
+        self.settings.crossfade_seconds = row.get_value()
 
     def _create_library_group(self):
         group = Adw.PreferencesGroup(

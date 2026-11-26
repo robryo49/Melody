@@ -1,4 +1,5 @@
 
+import math
 import random
 import time
 
@@ -11,6 +12,20 @@ gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
 
+class _Deck:
+    """A playbin with its own audio chain: the preamp and the equalizer.
+
+    Normally there is one deck. A crossfade briefly has two: the outgoing
+    track on the current one, the incoming track on a second one.
+    """
+
+    def __init__(self, player, bus, preamp, equalizer):
+        self.player = player
+        self.bus = bus
+        self.preamp = preamp
+        self.equalizer = equalizer
+
+
 class PlaybackManager:
     REPEAT_MODES = ("off", "all", "one")
 
@@ -19,32 +34,29 @@ class PlaybackManager:
     # through a track does not count, and neither does seeking ahead.
     PLAY_COUNT_MAX_SECONDS = 240.0
 
+    # How long before the end of a track the next one is decided (gapless),
+    # and how long before a crossfade starts that it is decided (crossfade
+    # decides it a little earlier, so the fade can start on time).
+    GAPLESS_PREPARE_SECONDS = 3.0
+    CROSSFADE_PREPARE_MARGIN = 1.5
+
     def __init__(self):
         Gst.init(None)
 
-        self.player = Gst.ElementFactory.make("playbin", "melody-player")
-        if self.player is None:
-            raise RuntimeError("Could not create the GStreamer playbin element")
-
-        # The equalizer sits in the audio path (see ``set_equalizer``). None
-        # when GStreamer's equalizer plugin is not installed: the music then
-        # plays untouched.
-        self._equalizer = None
-        self._preamp = None
+        # The equalizer's bands, in dB, as GStreamer's ``equalizer-10bands``
+        # allows them. Kept here so that every deck gets the same gains.
+        self._gains = [0.0] * self.EQUALIZER_BANDS
+        # The equalizer sits in the audio path (see ``set_equalizer``). When
+        # GStreamer's equalizer plugin is not installed the music plays
+        # untouched.
         # The preamp's volume is the product of two things: the equalizer's
         # headroom (see ``set_equalizer``) and the ReplayGain of the track
         # being played (see ``_apply_replaygain``).
         self._equalizer_headroom = 1.0
         self._replaygain_enabled = False
         self._replaygain_factor = 1.0
-        audio_filter = self._create_audio_filter()
 
-        if audio_filter is not None:
-            self.player.set_property("audio-filter", audio_filter)
-
-        self.bus = self.player.get_bus()
-        self.bus.add_signal_watch()
-        self.bus.connect("message", self._on_bus_message)
+        self.deck = self._make_deck("melody-player")
 
         self.queue = []
         # Goes up each time the queue's tracks change, so a view of the queue
@@ -71,6 +83,16 @@ class PlaybackManager:
         self._shuffle_history = []
         self._shuffle_history_position = -1
 
+        # Gapless playback and crossfade (see ``set_transitions``).
+        self.gapless = True
+        self.crossfade_seconds = 0.0
+        # The next track, decided ahead of time (see ``_prepare_next``), and
+        # the one GStreamer has been handed for a gapless change (see
+        # ``_on_about_to_finish``). ``_fade`` is a crossfade in progress.
+        self._prepared = None
+        self._gapless_pending = None
+        self._fade = None
+
         self.on_track_changed = None
         self.on_state_changed = None
         self.on_error = None
@@ -85,8 +107,14 @@ class PlaybackManager:
         self._play_counted = False
         self._last_tick = time.monotonic()
 
-        self.player.set_property("volume", self.volume)
+        self.deck.player.set_property("volume", self.volume)
         GLib.timeout_add(1000, self._tick)
+        GLib.timeout_add(250, self._check_transitions)
+
+    @property
+    def player(self):
+        """The playbin of the track being played (the deck in use)."""
+        return self.deck.player
 
     # The equalizer's bands, in dB, as GStreamer's ``equalizer-10bands``
     # allows them.
@@ -94,13 +122,34 @@ class PlaybackManager:
     EQUALIZER_MIN_GAIN = -24.0
     EQUALIZER_MAX_GAIN = 12.0
 
-    def _create_audio_filter(self):
+    def _make_deck(self, name):
+        """A new playbin with its audio chain, listening to its bus."""
+        player = Gst.ElementFactory.make("playbin", name)
+        if player is None:
+            raise RuntimeError("Could not create the GStreamer playbin element")
+
+        audio_filter, preamp, equalizer = self._build_audio_filter()
+
+        if audio_filter is not None:
+            player.set_property("audio-filter", audio_filter)
+
+        bus = player.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self._on_bus_message)
+        player.connect("about-to-finish", self._on_about_to_finish)
+
+        deck = _Deck(player, bus, preamp, equalizer)
+        self._apply_gains(deck)
+        return deck
+
+    def _build_audio_filter(self):
         """The elements the sound goes through: a preamp, then the equalizer.
 
         The preamp carries the equalizer's headroom and the ReplayGain (see
         ``_update_preamp``). If the equalizer plugin is missing, the preamp
-        is kept on its own, so ReplayGain still works. Returns None if even
-        that cannot be built.
+        is kept on its own, so ReplayGain still works. Returns
+        ``(filter, preamp, equalizer)``, the last three None if even the
+        preamp cannot be built.
         """
         for description in (
             "audioconvert ! volume name=melody-preamp ! "
@@ -120,31 +169,35 @@ class PlaybackManager:
             if preamp is None:
                 continue
 
-            self._preamp = preamp
-            self._equalizer = audio_filter.get_by_name("melody-equalizer")
-            return audio_filter
+            equalizer = audio_filter.get_by_name("melody-equalizer")
+            return audio_filter, preamp, equalizer
 
-        return None
+        return None, None, None
 
     @property
     def has_equalizer(self):
         """Whether the equalizer can be used (its GStreamer plugin is there)."""
-        return self._equalizer is not None
+        return self.deck.equalizer is not None
+
+    def _apply_gains(self, deck):
+        if deck.equalizer is None:
+            return
+
+        for index, gain in enumerate(self._gains):
+            deck.equalizer.set_property(f"band{index}", gain)
 
     def set_equalizer(self, gains):
         """Set the gain of each of the ten bands, in dB (0 leaves it alone).
         Takes effect at once, even in the middle of a track."""
-        if self._equalizer is None:
-            return
-
         gains = [
             max(self.EQUALIZER_MIN_GAIN, min(self.EQUALIZER_MAX_GAIN, float(gain)))
             for gain in list(gains)[:self.EQUALIZER_BANDS]
         ]
         gains += [0.0] * (self.EQUALIZER_BANDS - len(gains))
+        self._gains = gains
 
-        for index, gain in enumerate(gains):
-            self._equalizer.set_property(f"band{index}", gain)
+        for deck in self._decks():
+            self._apply_gains(deck)
 
         # Headroom: the loudest boost is taken off the whole sound, so the
         # boosted bands cannot go past the top.
@@ -152,14 +205,24 @@ class PlaybackManager:
         self._equalizer_headroom = 10 ** (-boost / 20)
         self._update_preamp()
 
+    def _decks(self):
+        """Every deck in use: the one playing, and the incoming one during a
+        crossfade."""
+        if self._fade is None:
+            return [self.deck]
+
+        return [self.deck, self._fade["deck"]]
+
     def _update_preamp(self):
         """Set the preamp's volume: the equalizer's headroom times the
         ReplayGain of the track being played."""
-        if self._preamp is None:
+        preamp = self.deck.preamp
+
+        if preamp is None:
             return
 
         volume = self._equalizer_headroom * self._replaygain_factor
-        self._preamp.set_property("volume", max(0.0, min(10.0, volume)))
+        preamp.set_property("volume", max(0.0, min(10.0, volume)))
 
     def set_replaygain_enabled(self, enabled):
         """Play tracks with their ReplayGain tag (or without). Takes effect at
@@ -177,15 +240,15 @@ class PlaybackManager:
         read it again."""
         self._apply_replaygain()
 
-    def _apply_replaygain(self):
-        """Work out the correction for the track being played, from its tags.
+    def _replaygain_factor_for(self, track):
+        """The volume correction for ``track``, from its ReplayGain tag.
 
         A track with no ReplayGain tag, or any trouble reading it, is played
         as it is. A boost never goes past what the track's own peak tag
         allows, so it cannot make it distort.
         """
         factor = 1.0
-        path = (self.current_track or {}).get("path")
+        path = (track or {}).get("path")
 
         if self._replaygain_enabled and path:
             gain, peak = read_replaygain(path)
@@ -197,8 +260,323 @@ class PlaybackManager:
                 if peak and peak > 0 and factor * peak > 1.0:
                     factor = 1.0 / peak
 
-        self._replaygain_factor = factor
+        return factor
+
+    def _apply_replaygain(self):
+        self._replaygain_factor = self._replaygain_factor_for(self.current_track)
         self._update_preamp()
+
+    # ------------------------------------------------------------------
+    # Gapless playback and crossfade
+    # ------------------------------------------------------------------
+
+    def set_transitions(self, gapless, crossfade_seconds):
+        """How one track follows the next. With a crossfade (more than 0
+        seconds) the end of a track fades into the next one, and gapless
+        playback is not used; without one, a track is handed over to the next
+        without a pause when ``gapless`` is on."""
+        self.gapless = bool(gapless)
+        self.crossfade_seconds = max(0.0, float(crossfade_seconds or 0))
+        self._cancel_transitions()
+
+    @staticmethod
+    def _plain(track):
+        """A track that plays from its very start to its very end: the only
+        kind that can be handed over without a seek."""
+        return track_range(track) == (0.0, None)
+
+    def _prepare_next(self):
+        """Decide which track plays after the current one, and keep it ready.
+
+        The choice of a shuffled queue changes the shuffle order, so the state
+        before it is kept: if the choice is dropped (the person skips, or the
+        queue changes), that state comes back and nothing is lost.
+        """
+        if (
+                self._prepared is not None
+                or self.current_index < 0
+                or not self.queue
+                or self.repeat_mode == "one"
+        ):
+            return
+
+        snapshot = self._shuffle_snapshot()
+
+        if self.shuffle:
+            index = self._next_shuffle_index()
+        elif self.current_index + 1 < len(self.queue):
+            index = self.current_index + 1
+        elif self.repeat_mode == "all":
+            index = 0
+        else:
+            index = None
+
+        track = self.queue[index] if index is not None else None
+        path = (track or {}).get("path")
+
+        # A track that cannot be handed over (a custom start or end, no file)
+        # is left to the normal change at the end, so it is not prepared.
+        if track is None or not path or not self._plain(track):
+            index = None
+
+        self._prepared = {
+            "index": index,
+            "track": track,
+            "uri": Gst.filename_to_uri(str(path)) if index is not None else None,
+            "snapshot": snapshot,
+            "version": self.queue_version,
+        }
+
+    def _drop_prepared(self):
+        """Forget the track prepared for next. The shuffle state is put back
+        as it was before it was chosen, unless the queue changed since (then
+        its shuffle order was made again already)."""
+        prepared = self._prepared
+        self._prepared = None
+        self._gapless_pending = None
+
+        if prepared is not None and prepared["version"] == self.queue_version:
+            self._restore_shuffle(prepared["snapshot"])
+
+    def _shuffle_snapshot(self):
+        return (
+            list(self._shuffle_history),
+            self._shuffle_history_position,
+            list(self._shuffle_remaining),
+        )
+
+    def _restore_shuffle(self, snapshot):
+        history, position, remaining = snapshot
+        self._shuffle_history = list(history)
+        self._shuffle_history_position = position
+        self._shuffle_remaining = list(remaining)
+
+    def _check_transitions(self):
+        """Every quarter second: take over a track GStreamer has moved to by
+        itself (gapless), and prepare and start a crossfade into the next one.
+        """
+        if self._gapless_pending is not None:
+            # The new track has started from its beginning.
+            if self.get_position() < 1.0:
+                self._commit_prepared()
+
+            return GLib.SOURCE_CONTINUE
+
+        if (
+                self._fade is not None
+                or self.current_track is None
+                or self.state != "playing"
+                or self._pending_seek is not None
+        ):
+            return GLib.SOURCE_CONTINUE
+
+        _start, end = self._track_range(self.current_track)
+
+        # A track with a custom end stops at that point, which is not the
+        # end of its file: it is left to the normal change.
+        if end is not None:
+            return GLib.SOURCE_CONTINUE
+
+        duration = self.get_duration()
+
+        if duration <= 0:
+            return GLib.SOURCE_CONTINUE
+
+        remaining = duration - self.get_position()
+
+        if self.crossfade_seconds > 0:
+            if (
+                    self._prepared is None
+                    and remaining <= self.crossfade_seconds
+                    + self.CROSSFADE_PREPARE_MARGIN
+            ):
+                self._prepare_next()
+
+            prepared = self._prepared
+
+            if (
+                    prepared is not None
+                    and prepared["index"] is not None
+                    and remaining <= self.crossfade_seconds
+            ):
+                self._start_fade()
+        elif (
+                self.gapless
+                and self._prepared is None
+                and remaining <= self.GAPLESS_PREPARE_SECONDS
+        ):
+            self._prepare_next()
+
+        return GLib.SOURCE_CONTINUE
+
+    def _on_about_to_finish(self, player):
+        """GStreamer is about to reach the end of the track: if the next one is
+        ready, hand it over now, so it plays with no gap.
+
+        This runs in GStreamer's own thread, so it only passes on what
+        ``_prepare_next`` already decided. The rest is done in the main thread
+        (see ``_check_transitions``).
+        """
+        prepared = self._prepared
+
+        if (
+                player is not self.deck.player
+                or prepared is None
+                or prepared["index"] is None
+                or self._gapless_pending is not None
+                or self._fade is not None
+                or self.crossfade_seconds > 0
+                or not self.gapless
+        ):
+            return
+
+        player.set_property("uri", prepared["uri"])
+        self._gapless_pending = prepared
+
+    def _commit_prepared(self):
+        """The track that was handed over is the one playing now: make it the
+        current track (gapless playback)."""
+        prepared = self._gapless_pending
+        self._prepared = None
+        self._gapless_pending = None
+
+        if prepared is None or prepared["index"] is None:
+            return
+
+        index = prepared["index"]
+
+        if prepared["version"] != self.queue_version:
+            # The queue changed while the track was handed over: find it again.
+            index = next(
+                (
+                    position for position, track in enumerate(self.queue)
+                    if track is prepared["track"]
+                ),
+                None,
+            )
+
+            if index is None:
+                return
+
+        self._commit_track(index)
+
+    def _commit_track(self, index):
+        """Make the queue's track at ``index`` the one being played, without
+        loading it again (used once a transition has happened)."""
+        track = self.queue[index]
+        self.current_index = index
+        self.current_track = track
+        self._apply_replaygain()
+        self._listened = 0.0
+        self._play_counted = False
+
+        if self.on_track_changed:
+            self.on_track_changed(track)
+
+        self._set_state("playing")
+
+    def _start_fade(self):
+        """Start the crossfade: the next track starts on a second deck, quiet,
+        and gets louder while the current one gets quieter (see
+        ``_fade_step``)."""
+        prepared = self._prepared
+
+        if prepared["version"] != self.queue_version:
+            self._drop_prepared()
+            return
+
+        deck = self._make_deck("melody-fade")
+        deck.player.set_property("uri", prepared["uri"])
+        deck.player.set_property("volume", 0.0)
+
+        if deck.preamp is not None:
+            volume = (
+                self._equalizer_headroom
+                * self._replaygain_factor_for(prepared["track"])
+            )
+            deck.preamp.set_property("volume", max(0.0, min(10.0, volume)))
+
+        self._fade = {
+            "deck": deck,
+            "outgoing": self.deck,
+            "started": time.monotonic(),
+            "duration": self.crossfade_seconds,
+            "prepared": prepared,
+        }
+        deck.player.set_state(Gst.State.PLAYING)
+        GLib.timeout_add(100, self._fade_step)
+
+    def _fade_step(self):
+        fade = self._fade
+
+        if fade is None:
+            return GLib.SOURCE_REMOVE
+
+        # The queue changed in the middle of the fade: the incoming track is
+        # no longer the next one, so the fade is given up.
+        if fade["prepared"]["version"] != self.queue_version:
+            self._cancel_fade()
+            return GLib.SOURCE_REMOVE
+
+        progress = min(
+            1.0,
+            (time.monotonic() - fade["started"]) / fade["duration"],
+        )
+        # Equal-power curves: the loudness stays even through the middle.
+        angle = progress * math.pi / 2
+        fade["outgoing"].player.set_property(
+            "volume", self.volume * math.cos(angle)
+        )
+        fade["deck"].player.set_property(
+            "volume", self.volume * math.sin(angle)
+        )
+
+        if progress >= 1.0:
+            self._finish_fade()
+            return GLib.SOURCE_REMOVE
+
+        return GLib.SOURCE_CONTINUE
+
+    def _finish_fade(self):
+        """The crossfade is over: the incoming deck becomes the deck in use."""
+        fade = self._fade
+        self._fade = None
+
+        self._drop_deck(fade["outgoing"])
+        self.deck = fade["deck"]
+        self._prepared = None
+        self.player.set_property("volume", self.volume)
+        self._commit_track(fade["prepared"]["index"])
+
+    def _cancel_fade(self):
+        fade = self._fade
+
+        if fade is None:
+            return
+
+        self._fade = None
+        self._drop_deck(fade["deck"])
+        fade["outgoing"].player.set_property("volume", self.volume)
+        self._drop_prepared()
+
+    def _cancel_transitions(self):
+        """Give up whatever was decided or started ahead of time, before the
+        queue is moved on by hand."""
+        if self._gapless_pending is not None and self.get_position() < 1.0:
+            # The player already moved on to the prepared track.
+            self._commit_prepared()
+
+        self._cancel_fade()
+        self._drop_prepared()
+
+    @staticmethod
+    def _drop_deck(deck):
+        deck.player.set_state(Gst.State.NULL)
+        deck.bus.remove_signal_watch()
+
+    # ------------------------------------------------------------------
+    # The queue
+    # ------------------------------------------------------------------
 
     def set_queue(self, tracks):
         self.queue_version += 1
@@ -328,6 +706,8 @@ class PlaybackManager:
 
     def play_index(self, index):
         """Play the track at ``index`` of the queue, keeping the queue."""
+        self._cancel_transitions()
+
         if not 0 <= index < len(self.queue):
             return
 
@@ -417,6 +797,7 @@ class PlaybackManager:
     def play_queue(self, tracks, index=0, source=None):
         """Play ``tracks`` from ``index``. ``source`` says what they are (the
         album, artist, playlist... they were started from)."""
+        self._cancel_transitions()
         self.queue = list(tracks)
         self.queue_version += 1
 
@@ -431,6 +812,18 @@ class PlaybackManager:
         self.current_index = index
         self._reset_shuffle(index)
         self._load_current_track()
+
+    def resume(self, tracks, index, position=0.0, source=None):
+        """Put back the queue of an earlier session: ``tracks``, with the one at
+        ``index`` loaded at ``position`` (seconds into its file) and paused.
+        Play goes on from there."""
+        self._cancel_transitions()
+        self.queue = list(tracks)
+        self.queue_version += 1
+        self.source = source
+        self.current_index = index
+        self._reset_shuffle(index)
+        self._load_current_track(resume_at=position)
 
     def play_track(self, track):
         self.play_queue([track], 0)
@@ -453,6 +846,8 @@ class PlaybackManager:
         if mode not in self.REPEAT_MODES:
             raise ValueError(f"Invalid repeat mode: {mode}")
 
+        # What comes next depends on the mode: the prepared track is redone.
+        self._cancel_transitions()
         self.repeat_mode = mode
 
     def cycle_repeat_mode(self):
@@ -467,6 +862,7 @@ class PlaybackManager:
         if self.shuffle == enabled:
             return
 
+        self._cancel_transitions()
         self.shuffle = enabled
 
         if self.current_track is not None:
@@ -478,6 +874,8 @@ class PlaybackManager:
         self.set_shuffle(not self.shuffle)
 
     def _load_current_track(self, resume_at=None):
+        self._cancel_transitions()
+
         if not 0 <= self.current_index < len(self.queue):
             self.stop()
             return
@@ -553,26 +951,9 @@ class PlaybackManager:
             # sets the new stop position.
             self.seek(self.get_position())
 
-    def resume(self, tracks, index, position=0.0, source=None):
-        """Put back the queue of an earlier session: ``tracks``, with the one at
-        ``index`` loaded at ``position`` (seconds into its file) and paused.
-        Play goes on from there."""
-        self.queue = list(tracks)
-        self.queue_version += 1
-        self.source = source
-        self.current_index = index
-        self._reset_shuffle(index)
-        self._load_current_track(resume_at=position)
-
-    def get_resume_position(self):
-        """Where the track being played is, for the next start: the position it
-        is waiting to start from while the pipeline is not ready yet."""
-        if self._pending_seek is not None:
-            return self._pending_seek
-
-        return self.get_position()
-
     def play(self):
+        self._cancel_transitions()
+
         if self.current_track is None:
             if self.queue:
                 self.current_index = 0
@@ -587,6 +968,8 @@ class PlaybackManager:
         self._set_state("playing")
 
     def pause(self):
+        self._cancel_transitions()
+
         if self.current_track is None:
             return
 
@@ -601,6 +984,7 @@ class PlaybackManager:
             self.play()
 
     def stop(self):
+        self._cancel_transitions()
         self._pending_seek = None
         self.player.set_state(Gst.State.NULL)
         self.current_track = None
@@ -638,6 +1022,8 @@ class PlaybackManager:
         return index
 
     def next(self):
+        self._cancel_transitions()
+
         if not self.queue or self.current_index < 0:
             return
 
@@ -662,6 +1048,8 @@ class PlaybackManager:
             self.stop()
 
     def previous(self):
+        self._cancel_transitions()
+
         start, _end = self._track_range(self.current_track)
         position = self.get_position() - start
 
@@ -694,6 +1082,8 @@ class PlaybackManager:
     def seek(self, position):
         if self.current_track is None:
             return False
+
+        self._cancel_transitions()
 
         # Not ready yet: just change where it will start.
         if self._pending_seek is not None:
@@ -739,6 +1129,14 @@ class PlaybackManager:
     def get_position(self):
         success, position = self.player.query_position(Gst.Format.TIME)
         return position / Gst.SECOND if success else 0.0
+
+    def get_resume_position(self):
+        """Where the track being played is, for the next start: the position it
+        is waiting to start from while the pipeline is not ready yet."""
+        if self._pending_seek is not None:
+            return self._pending_seek
+
+        return self.get_position()
 
     def get_duration(self):
         success, duration = self.player.query_duration(Gst.Format.TIME)
@@ -786,9 +1184,15 @@ class PlaybackManager:
 
     def _on_bus_message(self, bus, message):
         if message.type == Gst.MessageType.EOS:
-            if self.repeat_mode == "one" and self.current_track is not None:
+            if self._fade is not None:
+                # The outgoing track ended before its fade did (it started
+                # late): the incoming track takes over now.
+                self._finish_fade()
+            elif self.repeat_mode == "one" and self.current_track is not None:
+                self._drop_prepared()
                 self._load_current_track()
             else:
+                self._drop_prepared()
                 self.next()
 
         elif message.type == Gst.MessageType.ERROR:
@@ -851,6 +1255,7 @@ class PlaybackManager:
         return GLib.SOURCE_CONTINUE
 
     def close(self):
-        self.player.set_state(Gst.State.NULL)
-        self.bus.remove_signal_watch()
+        self._cancel_transitions()
+        self.deck.player.set_state(Gst.State.NULL)
+        self.deck.bus.remove_signal_watch()
         self._set_state("stopped")

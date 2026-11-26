@@ -376,6 +376,7 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         self._update_compilations_ui()
         self.settings.connect_changed(self._on_settings_changed)
+        self._apply_transitions()
 
         # The categories already known are in the sidebar from the start,
         # before the first scan has filled the Playlists page.
@@ -1002,6 +1003,15 @@ class MelodyWindow(Adw.ApplicationWindow):
         ):
             self._select_page("Library")
 
+    def _apply_transitions(self):
+        """Give the player how one track follows the next (see
+        ``PlaybackManager.set_transitions``)."""
+        self.playback_manager.set_transitions(
+            self.settings.gapless_enabled,
+            self.settings.crossfade_seconds
+            if self.settings.crossfade_enabled else 0.0,
+        )
+
     def _on_settings_changed(self):
         # Watching the folder can be switched on and off.
         if self.settings.auto_scan_enabled:
@@ -1011,6 +1021,8 @@ class MelodyWindow(Adw.ApplicationWindow):
 
         # Which tracks go where depends on the settings: sort them out again.
         self._update_compilations_ui()
+
+        self._apply_transitions()
 
         for name in ("Library", "Compilations", "Favorites", "Recent", "Most played", "Albums", "Artists", "Search"):
             self.views[name].set_tracks(self.tracks)
